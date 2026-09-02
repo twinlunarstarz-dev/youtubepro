@@ -2,41 +2,47 @@ import { chmod, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Request } from "express";
 import { z } from "zod";
-import { configureGeminiApiKey, configureGeminiModels } from "./gemini";
 import {
-  DEFAULT_GEMINI_IMAGE_MODEL,
-  DEFAULT_GEMINI_TEXT_MODEL,
-  GEMINI_IMAGE_MODELS,
-  GEMINI_TEXT_MODELS,
-  isGeminiImageModel,
-  isGeminiTextModel,
-  type GeminiImageModel,
-  type GeminiTextModel,
-} from "./gemini-models";
+  configureAIProvider,
+  getAIProviderConfig,
+  isLocalAIEndpoint,
+  normalizeAIBaseUrl,
+} from "./openai-compatible";
 
 const ENV_PATH = path.resolve(process.cwd(), ".env");
 const ENV_TEMP_PATH = path.resolve(process.cwd(), ".env.tmp");
 const SUPPORTED_KEYS = [
   "YOUTUBE_API_KEY",
-  "GEMINI_API_KEY",
-  "GEMINI_TEXT_MODEL",
-  "GEMINI_IMAGE_MODEL",
+  "AI_BASE_URL",
+  "AI_API_KEY",
+  "AI_TEXT_MODEL",
+  "AI_IMAGE_MODEL",
+  "AI_IMAGE_SIZE",
 ] as const;
 
 type SupportedKey = (typeof SUPPORTED_KEYS)[number];
 
 export interface ApiKeySettings {
   youtubeApiKey?: string;
-  geminiApiKey?: string;
-  geminiTextModel?: string;
-  geminiImageModel?: string;
+  aiBaseUrl?: string;
+  aiApiKey?: string;
+  clearAiApiKey?: boolean;
+  aiTextModel?: string;
+  aiImageModel?: string;
+  aiImageSize?: string;
 }
+
+const modelIdSchema = z.string().trim().min(1).max(256).refine((value) => !/[\r\n\0]/.test(value), "Model ID contains unsupported characters.");
+const optionalImageModelSchema = z.string().trim().max(256).refine((value) => !/[\r\n\0]/.test(value), "Image model ID contains unsupported characters.");
 
 export const apiKeySettingsSchema = z.object({
   youtubeApiKey: z.string().trim().min(8).max(512).optional(),
-  geminiApiKey: z.string().trim().min(8).max(512).optional(),
-  geminiTextModel: z.string().refine(isGeminiTextModel, "Select a supported Gemini text model.").optional(),
-  geminiImageModel: z.string().refine(isGeminiImageModel, "Select a supported Gemini image model.").optional(),
+  aiBaseUrl: z.string().trim().min(8).max(2_048).optional(),
+  aiApiKey: z.string().trim().min(1).max(2_048).optional(),
+  clearAiApiKey: z.boolean().optional(),
+  aiTextModel: modelIdSchema.optional(),
+  aiImageModel: optionalImageModelSchema.optional(),
+  aiImageSize: z.string().trim().regex(/^(?:auto|\d{2,5}x\d{2,5})$/i).optional(),
 }).strict();
 
 function isLoopbackAddress(address: string | undefined): boolean {
@@ -118,39 +124,30 @@ export function isLocalSettingsRequest(req: Request): boolean {
 }
 
 export function getApiKeyStatus() {
-  const textModel = isGeminiTextModel(process.env.GEMINI_TEXT_MODEL || "")
-    ? process.env.GEMINI_TEXT_MODEL as GeminiTextModel
-    : DEFAULT_GEMINI_TEXT_MODEL;
-  const imageModel = isGeminiImageModel(process.env.GEMINI_IMAGE_MODEL || "")
-    ? process.env.GEMINI_IMAGE_MODEL as GeminiImageModel
-    : DEFAULT_GEMINI_IMAGE_MODEL;
-
+  const ai = getAIProviderConfig();
   return {
     youtube: Boolean(process.env.YOUTUBE_API_KEY?.trim()),
-    gemini: Boolean(process.env.GEMINI_API_KEY?.trim()),
-    models: {
-      text: textModel,
-      image: imageModel,
-      textOptions: GEMINI_TEXT_MODELS,
-      imageOptions: GEMINI_IMAGE_MODELS,
+    ai: {
+      apiKeyConfigured: Boolean(ai.apiKey),
+      baseUrl: ai.baseUrl,
+      textModel: ai.textModel,
+      imageModel: ai.imageModel,
+      imageSize: ai.imageSize,
+      localEndpoint: isLocalAIEndpoint(ai.baseUrl),
+      legacyGeminiConfig: ai.legacyGeminiConfig,
     },
   };
 }
 
-function validateApiKey(value: unknown, label: string): string | undefined {
+function validateSecret(value: unknown, label: string, minLength: number): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string") {
-    throw new Error(`${label} must be a string.`);
-  }
-
+  if (typeof value !== "string") throw new Error(`${label} must be a string.`);
   const trimmed = value.trim();
   if (!trimmed) return undefined;
-  if (trimmed.length < 8 || trimmed.length > 512) {
-    throw new Error(`${label} must be between 8 and 512 characters.`);
+  if (trimmed.length < minLength || trimmed.length > 2_048) {
+    throw new Error(`${label} must be between ${minLength} and 2048 characters.`);
   }
-  if (/\r|\n|\0/.test(trimmed)) {
-    throw new Error(`${label} contains unsupported characters.`);
-  }
+  if (/\r|\n|\0/.test(trimmed)) throw new Error(`${label} contains unsupported characters.`);
   return trimmed;
 }
 
@@ -159,34 +156,31 @@ function setEnvValue(contents: string, key: SupportedKey, value: string): string
   const lines = contents.split(/\r?\n/);
   const lineIndex = lines.findIndex((line) => line.startsWith(`${key}=`));
 
-  if (lineIndex >= 0) {
-    lines[lineIndex] = assignment;
-  } else {
+  if (lineIndex >= 0) lines[lineIndex] = assignment;
+  else {
     if (lines.length > 0 && lines.at(-1) !== "") lines.push("");
     lines.push(assignment);
   }
-
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
 export async function saveApiKeySettings(input: ApiKeySettings) {
-  const youtubeApiKey = validateApiKey(input.youtubeApiKey, "YouTube API key");
-  const geminiApiKey = validateApiKey(input.geminiApiKey, "Gemini API key");
-  const currentStatus = getApiKeyStatus();
-  const textModel = input.geminiTextModel ?? currentStatus.models.text;
-  const imageModel = input.geminiImageModel ?? currentStatus.models.image;
+  const youtubeApiKey = validateSecret(input.youtubeApiKey, "YouTube API key", 8);
+  const aiApiKey = validateSecret(input.aiApiKey, "AI API key", 1);
+  const current = getAIProviderConfig();
+  const migratedLegacyApiKey = current.legacyGeminiConfig && !input.clearAiApiKey ? current.apiKey : undefined;
+  const effectiveAiApiKey = aiApiKey ?? migratedLegacyApiKey;
+  const baseUrl = normalizeAIBaseUrl(input.aiBaseUrl ?? current.baseUrl);
+  const textModel = (input.aiTextModel ?? current.textModel).trim();
+  const imageModel = input.aiImageModel !== undefined ? input.aiImageModel.trim() : current.imageModel;
+  const imageSize = (input.aiImageSize ?? current.imageSize).trim();
 
-  if (!youtubeApiKey && !geminiApiKey
-    && input.geminiTextModel === undefined
-    && input.geminiImageModel === undefined) {
-    throw new Error("Enter a replacement key or select a model to save.");
+  if (!textModel) throw new Error("AI text model is required.");
+  if (!/^(?:auto|\d{2,5}x\d{2,5})$/i.test(imageSize)) {
+    throw new Error("AI image size must be 'auto' or WIDTHxHEIGHT.");
   }
-
-  if (!isGeminiTextModel(textModel)) {
-    throw new Error("Select a supported Gemini text model.");
-  }
-  if (!isGeminiImageModel(imageModel)) {
-    throw new Error("Select a supported Gemini image model.");
+  if (input.clearAiApiKey && aiApiKey) {
+    throw new Error("Choose either a replacement AI API key or clear the saved key, not both.");
   }
 
   let contents = "";
@@ -196,22 +190,27 @@ export async function saveApiKeySettings(input: ApiKeySettings) {
     if (error?.code !== "ENOENT") throw error;
   }
 
-  if (youtubeApiKey) {
-    contents = setEnvValue(contents, "YOUTUBE_API_KEY", youtubeApiKey);
-  }
-  if (geminiApiKey) {
-    contents = setEnvValue(contents, "GEMINI_API_KEY", geminiApiKey);
-  }
-  contents = setEnvValue(contents, "GEMINI_TEXT_MODEL", textModel);
-  contents = setEnvValue(contents, "GEMINI_IMAGE_MODEL", imageModel);
+  if (youtubeApiKey) contents = setEnvValue(contents, "YOUTUBE_API_KEY", youtubeApiKey);
+  contents = setEnvValue(contents, "AI_BASE_URL", baseUrl);
+  contents = setEnvValue(contents, "AI_TEXT_MODEL", textModel);
+  contents = setEnvValue(contents, "AI_IMAGE_MODEL", imageModel);
+  contents = setEnvValue(contents, "AI_IMAGE_SIZE", imageSize);
+  if (effectiveAiApiKey !== undefined) contents = setEnvValue(contents, "AI_API_KEY", effectiveAiApiKey);
+  else if (input.clearAiApiKey) contents = setEnvValue(contents, "AI_API_KEY", "");
 
   await writeFile(ENV_TEMP_PATH, contents, { encoding: "utf8", mode: 0o600 });
   await rename(ENV_TEMP_PATH, ENV_PATH);
   await chmod(ENV_PATH, 0o600);
 
   if (youtubeApiKey) process.env.YOUTUBE_API_KEY = youtubeApiKey;
-  if (geminiApiKey) configureGeminiApiKey(geminiApiKey);
-  configureGeminiModels(textModel, imageModel);
+  configureAIProvider({
+    baseUrl,
+    textModel,
+    imageModel,
+    imageSize,
+    ...(effectiveAiApiKey !== undefined ? { apiKey: effectiveAiApiKey } : {}),
+    ...(input.clearAiApiKey ? { apiKey: "" } : {}),
+  });
 
   return getApiKeyStatus();
 }

@@ -23,7 +23,7 @@ export class ProviderError extends Error {
   }
 }
 
-type ProviderErrorContext = "youtube" | "gemini";
+type ProviderErrorContext = "youtube" | "gemini" | "ai";
 
 function categoryFromMessage(message: string): ProviderErrorCategory {
   const normalized = message.toLowerCase();
@@ -84,31 +84,31 @@ export function providerErrorPayload(error: ProviderError, contextLabel: string)
   const copy: Record<ProviderErrorCategory, { error: string; suggestion: string }> = {
     missing_key: {
       error: `${contextLabel} is not configured`,
-      suggestion: "Add the provider API key in Settings, then try again.",
+      suggestion: "Configure the provider in Settings, then try again.",
     },
     invalid_key: {
       error: `${contextLabel} rejected the configured API key`,
-      suggestion: "Replace the API key in Settings and verify its provider restrictions.",
+      suggestion: "Replace the API key in Settings or verify the endpoint authentication settings.",
     },
     quota: {
       error: `${contextLabel} quota is unavailable`,
-      suggestion: "Wait for quota to reset or review the provider quota before retrying.",
+      suggestion: "Wait for quota to reset, switch to a local endpoint, or review the provider quota before retrying.",
     },
     timeout: {
       error: `${contextLabel} timed out`,
-      suggestion: "Check the connection and retry. Repeated timeouts may indicate a provider incident.",
+      suggestion: "Check the endpoint and retry. Local models may need a longer AI_TIMEOUT_MS.",
     },
     network: {
       error: `${contextLabel} could not be reached`,
-      suggestion: "Check the server network connection and retry.",
+      suggestion: "Check the configured base URL and make sure the local or remote server is running.",
     },
     provider_server: {
       error: `${contextLabel} returned a server error`,
-      suggestion: "Retry after a short delay. If it continues, check the provider status page.",
+      suggestion: "Retry after a short delay or inspect the local provider logs.",
     },
     invalid_response: {
       error: `${contextLabel} returned an invalid response`,
-      suggestion: "Retry once. If it continues, choose another supported model or report the response contract failure.",
+      suggestion: "Retry once. If it continues, choose a compatible model or endpoint and inspect the server logs.",
     },
     unknown: {
       error: `${contextLabel} encountered an issue`,

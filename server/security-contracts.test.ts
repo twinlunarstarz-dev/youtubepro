@@ -42,9 +42,15 @@ test("local Settings rejects forwarded, non-loopback, and cross-origin requests"
   }), false);
 });
 
-test("Settings payload is strict, bounded, and model allowlisted", () => {
+test("Settings payload is strict, bounded, and accepts arbitrary compatible model IDs", () => {
   assert.equal(apiKeySettingsSchema.safeParse({ youtubeApiKey: "x".repeat(513) }).success, false);
-  assert.equal(apiKeySettingsSchema.safeParse({ geminiTextModel: "unknown-model" }).success, false);
+  assert.equal(apiKeySettingsSchema.safeParse({
+    aiBaseUrl: "http://127.0.0.1:8080/v1",
+    aiTextModel: "my-local-model",
+    aiImageModel: "",
+    aiImageSize: "1024x1024",
+  }).success, true);
+  assert.equal(apiKeySettingsSchema.safeParse({ aiTextModel: "x".repeat(257) }).success, false);
   assert.equal(apiKeySettingsSchema.safeParse({ unexpected: true }).success, false);
 });
 
