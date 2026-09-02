@@ -42,16 +42,29 @@ test("local Settings rejects forwarded, non-loopback, and cross-origin requests"
   }), false);
 });
 
-test("Settings payload is strict, bounded, and accepts arbitrary compatible model IDs", () => {
+test("Settings payload is strict, bounded, and exposes split text/image provider controls", () => {
   assert.equal(apiKeySettingsSchema.safeParse({ youtubeApiKey: "x".repeat(513) }).success, false);
   assert.equal(apiKeySettingsSchema.safeParse({
-    aiBaseUrl: "http://127.0.0.1:8080/v1",
+    aiTextBaseUrl: "http://127.0.0.1:8080/v1",
     aiTextModel: "my-local-model",
-    aiImageModel: "",
+    aiTextTimeoutMs: 120000,
+    aiImageBaseUrl: "http://127.0.0.1:9090/v1",
+    aiImageModel: "my-image-model",
     aiImageSize: "1024x1024",
+    aiImageTimeoutMs: 300000,
   }).success, true);
   assert.equal(apiKeySettingsSchema.safeParse({ aiTextModel: "x".repeat(257) }).success, false);
+  assert.equal(apiKeySettingsSchema.safeParse({ aiTextTimeoutMs: 999 }).success, false);
+  assert.equal(apiKeySettingsSchema.safeParse({ aiImageTimeoutMs: 1_800_001 }).success, false);
   assert.equal(apiKeySettingsSchema.safeParse({ unexpected: true }).success, false);
+});
+
+test("Settings preserves backward-compatible shared AI fields", () => {
+  assert.equal(apiKeySettingsSchema.safeParse({
+    aiBaseUrl: "http://127.0.0.1:8080/v1",
+    aiApiKey: "shared-key",
+    aiTextModel: "model",
+  }).success, true);
 });
 
 test("public text request schemas reject oversized or unknown input", () => {

@@ -8,7 +8,10 @@ import {
   chatCompletion,
   configureAIProvider,
   generateImage,
+  getAIProviderConfig,
+  listAIModels,
   normalizeAIBaseUrl,
+  testAITextConnection,
 } from "./openai-compatible";
 
 async function readJson(req: IncomingMessage): Promise<any> {
@@ -38,6 +41,38 @@ test("normalizes OpenAI-compatible base URLs safely", () => {
   assert.throws(() => normalizeAIBaseUrl("http://user:pass@example.com/v1"), /API key field/);
 });
 
+test("text and image providers can use different endpoints and keys", { concurrency: false }, () => {
+  configureAIProvider({
+    textBaseUrl: "http://127.0.0.1:8080/v1",
+    textApiKey: "text-key",
+    textModel: "text-model",
+    textTimeoutMs: 45_000,
+    imageBaseUrl: "http://127.0.0.1:9090/v1",
+    imageApiKey: "image-key",
+    imageModel: "image-model",
+    imageSize: "1024x1024",
+    imageTimeoutMs: 180_000,
+  });
+  const config = getAIProviderConfig();
+  assert.equal(config.textBaseUrl, "http://127.0.0.1:8080/v1");
+  assert.equal(config.textApiKey, "text-key");
+  assert.equal(config.textModel, "text-model");
+  assert.equal(config.textTimeoutMs, 45_000);
+  assert.equal(config.imageBaseUrl, "http://127.0.0.1:9090/v1");
+  assert.equal(config.imageApiKey, "image-key");
+  assert.equal(config.imageModel, "image-model");
+  assert.equal(config.imageTimeoutMs, 180_000);
+});
+
+test("legacy shared provider input still configures both endpoints", { concurrency: false }, () => {
+  configureAIProvider({ baseUrl: "http://127.0.0.1:7777/v1", apiKey: "shared", textModel: "model" });
+  const config = getAIProviderConfig();
+  assert.equal(config.textBaseUrl, "http://127.0.0.1:7777/v1");
+  assert.equal(config.imageBaseUrl, "http://127.0.0.1:7777/v1");
+  assert.equal(config.textApiKey, "shared");
+  assert.equal(config.imageApiKey, "shared");
+});
+
 test("chat completion works without an API key for local servers", { concurrency: false }, async () => {
   await withServer(async (req, res) => {
     assert.equal(req.url, "/v1/chat/completions");
@@ -47,7 +82,7 @@ test("chat completion works without an API key for local servers", { concurrency
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ choices: [{ message: { content: "local response" } }] }));
   }, async (baseUrl) => {
-    configureAIProvider({ baseUrl, apiKey: "", textModel: "local-model", imageModel: "" });
+    configureAIProvider({ textBaseUrl: baseUrl, textApiKey: "", textModel: "local-model", imageModel: "" });
     assert.equal(await chatCompletion("hello"), "local response");
   });
 });
@@ -65,22 +100,60 @@ test("JSON mode falls back when a compatible server rejects response_format", { 
     }
     res.end(JSON.stringify({ choices: [{ message: { content: "```json\n{\"ok\":true}\n```" } }] }));
   }, async (baseUrl) => {
-    configureAIProvider({ baseUrl, apiKey: "", textModel: "local-model" });
+    configureAIProvider({ textBaseUrl: baseUrl, textApiKey: "", textModel: "local-model" });
     assert.equal(await chatCompletion("json please", { json: true }), '{"ok":true}');
     assert.equal(calls, 2);
   });
 });
 
-test("OpenAI-compatible image generation accepts base64 responses", { concurrency: false }, async () => {
+test("model discovery uses the selected endpoint and optional key", { concurrency: false }, async () => {
+  await withServer((req, res) => {
+    assert.equal(req.url, "/v1/models");
+    assert.equal(req.headers.authorization, "Bearer draft-key");
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ data: [{ id: "model-b" }, { id: "model-a" }, { id: "model-a" }] }));
+  }, async (baseUrl) => {
+    const models = await listAIModels("text", { baseUrl, apiKey: "draft-key", timeoutMs: 5_000 });
+    assert.deepEqual(models, ["model-b", "model-a"]);
+  });
+});
+
+test("LLM connection test uses unsaved draft endpoint settings", { concurrency: false }, async () => {
+  await withServer(async (req, res) => {
+    assert.equal(req.url, "/v1/chat/completions");
+    assert.equal(req.headers.authorization, "Bearer probe-key");
+    const body = await readJson(req);
+    assert.equal(body.model, "probe-model");
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { content: "OK" } }] }));
+  }, async (baseUrl) => {
+    const result = await testAITextConnection({ baseUrl, apiKey: "probe-key", model: "probe-model", timeoutMs: 5_000 });
+    assert.equal(result.ok, true);
+    assert.equal(result.model, "probe-model");
+    assert.equal(result.responsePreview, "OK");
+    assert.ok(result.latencyMs >= 0);
+  });
+});
+
+test("OpenAI-compatible image generation accepts base64 responses from a separate endpoint", { concurrency: false }, async () => {
   const image = Buffer.from("fake-png-bytes").toString("base64");
   await withServer(async (req, res) => {
     assert.equal(req.url, "/v1/images/generations");
+    assert.equal(req.headers.authorization, "Bearer image-secret");
     const body = await readJson(req);
     assert.equal(body.model, "local-image");
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ data: [{ b64_json: image }] }));
   }, async (baseUrl) => {
-    configureAIProvider({ baseUrl, apiKey: "", textModel: "local-model", imageModel: "local-image", imageSize: "1024x1024" });
+    configureAIProvider({
+      textBaseUrl: "http://127.0.0.1:65530/v1",
+      textApiKey: "text-secret",
+      textModel: "local-model",
+      imageBaseUrl: baseUrl,
+      imageApiKey: "image-secret",
+      imageModel: "local-image",
+      imageSize: "1024x1024",
+    });
     const result = await generateImage("thumbnail");
     assert.equal(result.imageData, `data:image/png;base64,${image}`);
   });

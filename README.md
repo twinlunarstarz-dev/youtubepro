@@ -8,9 +8,9 @@
   Research, understand, write, and package a YouTube video in one local-first workflow.
 </p>
 
-YouTube Pro is an evidence-grounded workspace for YouTube research, idea selection, script writing, and thumbnail creation. It combines official public YouTube Data API v3 records with any OpenAI-compatible AI endpoint while keeping API keys on the local server.
+YouTube Pro is an evidence-grounded workspace for YouTube research, idea selection, script writing, and thumbnail creation. It combines official public YouTube Data API v3 records with configurable OpenAI-compatible AI providers while keeping API keys on the local server.
 
-The AI layer is provider-neutral. You can use OpenAI, `llama.cpp`/`llama-server`, LocalAI, Gemini's OpenAI-compatible endpoint, or another server that implements the OpenAI chat-completions contract. A local text model can run the AI research/writing workflow with no paid AI API calls.
+The AI layer is provider-neutral. You can use OpenAI, `llama.cpp` / `llama-server`, LocalAI, Gemini's OpenAI-compatible endpoint, or another server that implements the common OpenAI chat/image contracts. Text and image generation can use the same server or completely different endpoints, models, keys, and timeouts.
 
 YouTube Pro is an independent project. It is not affiliated with, endorsed by, or sponsored by YouTube, Google, OpenAI, LocalAI, or llama.cpp.
 
@@ -36,40 +36,34 @@ Turn the active snapshot into a scan-first research brief with audience question
 
 ### Script teleprompter
 
-Turn a selected idea into an editable script, then read it in a focused teleprompter with pace, size, cue, undo, and playback controls. Narration extraction is deterministic and local; it no longer spends an AI request simply to remove timestamps and stage directions.
+Turn a selected idea into an editable script, then read it in a focused teleprompter with pace, size, cue, undo, and playback controls. Narration extraction is deterministic and local; it does not spend an AI request simply to remove timestamps and stage directions.
 
 ![YouTube Pro teleprompter with playback and reading controls](docs/images/script-teleprompter.png)
 
 ### Thumbnail Creator
 
-Describe the outcome once, choose optional controls, and generate a thumbnail when the configured endpoint implements OpenAI-compatible `/images/generations`.
+Describe the outcome once, choose optional controls, and generate a thumbnail when the configured image endpoint implements OpenAI-compatible `/images/generations`.
 
 ![YouTube Pro Thumbnail Creator with a generated thumbnail preview and minimal creation controls](docs/images/thumbnail-creator.png)
 
-> OpenAI-compatible text APIs are much more widely implemented than image APIs. A text-only `llama.cpp` server can use Research, AI Insights, Ideas, Script Writer, title/section/paragraph regeneration, thumbnail text suggestions, and local narration extraction. Generated thumbnail images require a compatible image-generation endpoint and `AI_IMAGE_MODEL`.
-
-These screenshots come from a live local development build using public YouTube metadata. They are not generated interface mockups.
+A text-only llama.cpp server can power Research AI Insights, Ideas, Script Writer, title/section/paragraph regeneration, thumbnail text suggestions, and local narration extraction. Generated thumbnail images require an image-capable endpoint and a configured image model.
 
 ## Workflow
 
-The product follows one continuous workflow:
-
 1. **Research**: Search up to 50 public YouTube videos, review the overview, analytics, coverage, and every returned video.
-2. **AI Insights**: The configured OpenAI-compatible text model analyzes the exact active research snapshot. Claims retain their snapshot identity and source video IDs, or are explicitly labeled as aggregate inference or as requiring YouTube Studio.
+2. **AI Insights**: The configured OpenAI-compatible text model analyzes the exact active research snapshot.
 3. **Grounded Ideas**: Ideas generate after valid Insights. Select one idea, then explicitly proceed to Script Writer.
 4. **Script Writer**: Generate and edit a script from the selected idea package and its evidence. Section and paragraph regeneration use the same bounded evidence context.
-5. **Thumbnail Creator**: Use the selected promise and thumbnail concept with an OpenAI-compatible image endpoint when one is configured.
+5. **Thumbnail Creator**: Use the selected promise and thumbnail concept with the configured OpenAI-compatible image endpoint when one is enabled.
 
-There is no standalone Ideas screen. The legacy `/ideas` path redirects to the Ideas section inside Research.
-
-Each press of **New Workflow** creates a separate local project. The sidebar keeps the eight most recent workflows in browser IndexedDB, lets the user rename or delete them, and reopens the last active Research, Script, or Thumbnail step. Research snapshots, generated ideas, editable scripts, thumbnail briefs, and generated thumbnail results are restored together. Uploaded reference images are intentionally not retained.
+Each press of **New Workflow** creates a separate local project. The sidebar keeps recent workflows in browser IndexedDB and restores Research, Script, and Thumbnail state together. Uploaded reference images are intentionally not retained.
 
 ## Requirements
 
-- Node.js 22.12 or newer. CI verifies Node.js 22.12 and the current Node.js 24 LTS line.
-- A YouTube Data API v3 key for Research search and public statistics. Google provides a free quota; this is quota-limited, not a keyless API.
-- An OpenAI-compatible text endpoint for AI Insights, Ideas, and Script Writer. This can be a free local server.
-- Optional: an OpenAI-compatible image endpoint for generated thumbnails.
+- Node.js 22.12 or newer.
+- A YouTube Data API v3 key for official Research search and public statistics.
+- An OpenAI-compatible text endpoint for AI-assisted features. This can be a free local server.
+- Optional: a separate OpenAI-compatible image endpoint for generated thumbnails.
 
 ```bash
 cp .env.example .env
@@ -79,136 +73,191 @@ npm run dev
 
 The server listens on `127.0.0.1:5000` by default. Open `http://127.0.0.1:5000`.
 
-You can also start without editing `.env` and configure the connections in **Settings**. Settings writes replacements to the ignored `.env` file with owner-only permissions. Saved secrets are never returned to the browser. Settings accepts direct loopback, same-origin requests only and rejects normal forwarded or reverse-proxy requests.
+## Configure everything from Settings
+
+You can start without manually editing `.env` and configure all model/API-facing settings in **Settings**. The UI exposes:
+
+### YouTube Data API
+
+- API key
+- clear/remove saved key
+
+### LLM / text generation
+
+- OpenAI-compatible base URL
+- exact model ID
+- API key
+- clear/remove saved key
+- request timeout in milliseconds
+- `/models` discovery when the provider supports it
+- a small live `/chat/completions` connection test with latency reporting
+
+### Image generation
+
+- independent OpenAI-compatible base URL
+- exact image model ID
+- independent API key
+- clear/remove saved key
+- image size (`WIDTHxHEIGHT` or `auto`)
+- request/download timeout in milliseconds
+- `/models` discovery when the provider supports it
+- one-click reuse of the LLM endpoint URL when both services share a server
+
+This lets you mix providers. For example, llama.cpp can handle text at `http://127.0.0.1:8080/v1` while a different LocalAI or hosted endpoint handles image generation at another URL with another API key.
+
+Settings writes replacements to the ignored `.env` file with owner-only permissions. Saved secrets are never returned to the browser. Settings and provider diagnostics accept direct loopback, same-origin requests only and reject normal forwarded or reverse-proxy requests.
 
 ## Lowest-cost / free local setup
 
-The cheapest supported setup is:
+A low-cost configuration is:
 
 - **YouTube research:** official YouTube Data API v3 free quota.
-- **Research analytics:** computed locally from the returned public metadata.
-- **AI text:** local `llama.cpp` or LocalAI model, so there is no paid AI API usage.
+- **Research analytics:** computed locally from returned public metadata.
+- **AI text:** local llama.cpp or LocalAI model, so there is no paid AI API usage.
 - **Narration extraction:** local deterministic cleanup, no AI request.
-- **Generated thumbnail image:** optional. Leave `AI_IMAGE_MODEL` blank if your local server is text-only, or configure a local image-capable LocalAI endpoint.
+- **Generated thumbnail image:** optional; leave the image model blank for text-only operation or point the image connection at a local image-capable server.
 
-The server caches identical YouTube searches for 15 minutes by default, including concurrent identical requests. This avoids spending repeated search quota when you revisit or refresh the same research query. Failed requests are never cached.
+The server caches identical YouTube searches for 15 minutes by default, including concurrent identical requests. Failed requests are not cached. Tune this with `YOUTUBE_CACHE_TTL_MS` and `YOUTUBE_CACHE_MAX_ENTRIES`.
 
-You can tune this behavior with `YOUTUBE_CACHE_TTL_MS` and `YOUTUBE_CACHE_MAX_ENTRIES`. The cache is in-memory and resets when the server restarts.
+## OpenAI-compatible API behavior
 
-## OpenAI-compatible configuration
+Text requests use the configured LLM base URL plus:
 
-The application calls these provider paths relative to `AI_BASE_URL`:
+- `POST /chat/completions`
+- `GET /models` for optional Settings discovery
 
-- `POST /chat/completions` for text features.
-- `POST /images/generations` for generated thumbnail images.
+Image requests use the configured image base URL plus:
 
-Structured text requests first use `response_format: {"type":"json_object"}`. If a compatible server rejects that optional field, YouTube Pro automatically retries the request without `response_format` and still validates the returned JSON against the application schemas.
+- `POST /images/generations`
+- `GET /models` for optional Settings discovery
 
-API keys are optional. The `Authorization: Bearer ...` header is sent only when `AI_API_KEY` is non-empty.
+Structured text requests first use `response_format: {"type":"json_object"}`. If a compatible server rejects that optional field, YouTube Pro retries without it and still validates the returned JSON against application schemas.
 
-### llama.cpp / llama-server
+Authorization headers are only sent when the corresponding provider key is non-empty. LLM and image keys are independent.
 
-Start `llama-server` with an instruction-following GGUF model, then use the local OpenAI-compatible endpoint. A typical configuration is:
+## Provider examples
+
+### llama.cpp / llama-server for text
 
 ```dotenv
-AI_BASE_URL=http://127.0.0.1:8080/v1
-AI_API_KEY=
+AI_TEXT_BASE_URL=http://127.0.0.1:8080/v1
+AI_TEXT_API_KEY=
 AI_TEXT_MODEL=local-model
+AI_TIMEOUT_MS=120000
+
+# Disable generated images:
 AI_IMAGE_MODEL=
 ```
 
-`llama-server` commonly serves one loaded text model, so the model name may be informational depending on your server configuration. Leave the image model blank because standard llama.cpp is text-only.
+Standard llama.cpp is text-only. Use the Settings **Discover models** button if your build exposes `/models`; otherwise enter the exact loaded model ID manually.
 
-### LocalAI
-
-For a LocalAI server listening on port 8080:
+### LocalAI for text and images on the same server
 
 ```dotenv
-AI_BASE_URL=http://127.0.0.1:8080/v1
-AI_API_KEY=
-AI_TEXT_MODEL=your-localai-text-model
-AI_IMAGE_MODEL=your-localai-image-model
+AI_TEXT_BASE_URL=http://127.0.0.1:8080/v1
+AI_TEXT_API_KEY=
+AI_TEXT_MODEL=your-text-model
+AI_TIMEOUT_MS=120000
+
+AI_IMAGE_BASE_URL=http://127.0.0.1:8080/v1
+AI_IMAGE_API_KEY=
+AI_IMAGE_MODEL=your-image-model
 AI_IMAGE_SIZE=1024x1024
+AI_IMAGE_TIMEOUT_MS=300000
 ```
 
-If LocalAI authentication is enabled, set `AI_API_KEY`. If you only installed a text model, leave `AI_IMAGE_MODEL` blank.
+### Split local text + hosted image provider
+
+```dotenv
+AI_TEXT_BASE_URL=http://127.0.0.1:8080/v1
+AI_TEXT_API_KEY=
+AI_TEXT_MODEL=local-model
+
+AI_IMAGE_BASE_URL=https://example-image-provider.test/v1
+AI_IMAGE_API_KEY=your-image-provider-key
+AI_IMAGE_MODEL=your-image-model
+AI_IMAGE_SIZE=1024x1024
+```
 
 ### OpenAI
 
 ```dotenv
-AI_BASE_URL=https://api.openai.com/v1
-AI_API_KEY=your-openai-api-key
+AI_TEXT_BASE_URL=https://api.openai.com/v1
+AI_TEXT_API_KEY=your-openai-api-key
 AI_TEXT_MODEL=your-text-model-id
+
+AI_IMAGE_BASE_URL=https://api.openai.com/v1
+AI_IMAGE_API_KEY=your-openai-api-key
 AI_IMAGE_MODEL=your-image-model-id
 AI_IMAGE_SIZE=1536x1024
 ```
 
 Use exact model IDs available to your account rather than relying on a hardcoded allowlist.
 
-### Gemini through its OpenAI compatibility endpoint
-
-Gemini can also be used through its OpenAI-compatible endpoint:
+### Gemini through OpenAI compatibility
 
 ```dotenv
-AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-AI_API_KEY=your-gemini-api-key
+AI_TEXT_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+AI_TEXT_API_KEY=your-gemini-api-key
 AI_TEXT_MODEL=your-gemini-text-model
-AI_IMAGE_MODEL=your-compatible-gemini-image-model
 ```
 
-Existing installs that only contain `GEMINI_API_KEY`, `GEMINI_TEXT_MODEL`, and `GEMINI_IMAGE_MODEL` are automatically mapped to this compatibility endpoint until an `AI_*` configuration is saved. The old variables are retained only for migration/backward compatibility; new installations should use `AI_*`.
+Existing installs that only contain `GEMINI_API_KEY`, `GEMINI_TEXT_MODEL`, and `GEMINI_IMAGE_MODEL` are automatically mapped through Gemini's compatibility endpoint until modern AI settings are saved.
 
-### Other compatible servers
-
-Set `AI_BASE_URL` to the server's `/v1`-style root and enter the exact model IDs exposed by that server. The base URL may be loopback, a private-LAN address, or HTTPS. URL-embedded usernames/passwords are rejected; use `AI_API_KEY` for Bearer authentication.
-
-## Configuration
+## Configuration reference
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `YOUTUBE_API_KEY` | YouTube Data API v3 search and public metadata enrichment | Required for Research |
-| `YOUTUBE_CACHE_TTL_MS` | In-memory lifetime for identical research searches | `900000` (15 min) |
+| `YOUTUBE_API_KEY` | YouTube Data API v3 search/public metadata | Required for Research |
+| `YOUTUBE_CACHE_TTL_MS` | In-memory lifetime for identical research searches | `900000` |
 | `YOUTUBE_CACHE_MAX_ENTRIES` | Maximum cached research queries per process | `100` |
-| `AI_BASE_URL` | OpenAI-compatible API root | `http://127.0.0.1:8080/v1` |
-| `AI_API_KEY` | Optional Bearer token/API key | Empty |
+| `AI_TEXT_BASE_URL` | OpenAI-compatible LLM API root | `http://127.0.0.1:8080/v1` |
+| `AI_TEXT_API_KEY` | Optional LLM Bearer token/API key | Empty |
 | `AI_TEXT_MODEL` | Exact text model ID | `local-model` |
-| `AI_IMAGE_MODEL` | Exact image model ID; blank disables image generation | Empty |
+| `AI_TIMEOUT_MS` | LLM request timeout | `120000` |
+| `AI_IMAGE_BASE_URL` | OpenAI-compatible image API root | shared/local default |
+| `AI_IMAGE_API_KEY` | Optional independent image Bearer token/API key | Empty/shared fallback |
+| `AI_IMAGE_MODEL` | Exact image model ID; blank disables generated images | Empty |
 | `AI_IMAGE_SIZE` | Provider-specific image size or `auto` | `1536x1024` |
-| `AI_TIMEOUT_MS` | Text request timeout | `120000` |
 | `AI_IMAGE_TIMEOUT_MS` | Image request/download timeout | `300000` |
+| `AI_BASE_URL` | Backward-compatible shared endpoint fallback | Local default |
+| `AI_API_KEY` | Backward-compatible shared key fallback | Empty |
 | `PORT` | Local HTTP port | `5000` |
 | `HOST` | Bind address | `127.0.0.1` |
 
+Split variables take precedence over shared aliases. Saving from the current Settings UI writes split text/image configuration and synchronizes the old shared aliases with the text provider for backward compatibility.
+
 ## Compatibility notes
 
-- OpenAI-compatible APIs are not perfectly identical. YouTube Pro intentionally uses a small common subset and validates every structured response.
+- OpenAI-compatible APIs are not perfectly identical. YouTube Pro intentionally uses a small common subset and validates structured responses.
+- `/models` is optional in practice. Failure to discover models does not prevent manual model IDs from working.
 - A server that supports `/chat/completions` but not `/images/generations` is fully usable for text features.
+- Text and image endpoints may be different providers, hosts, authentication credentials, and timeout profiles.
 - Image sizes and supported image model IDs are provider-specific.
-- Reference-image editing is not standardized across the OpenAI-compatible servers targeted here. The generic image path currently requires zero reference images; reference-image requests return an explicit unsupported-provider error instead of silently ignoring the images.
-- Local models vary greatly in JSON reliability. Instruction-tuned models with enough context window for the supplied research snapshot work best.
-- If a local model is slow, increase `AI_TIMEOUT_MS` rather than exposing the app publicly.
+- Reference-image editing is not standardized across the targeted OpenAI-compatible servers. Generic image generation currently rejects reference-image editing rather than silently ignoring references.
+- Local models vary in JSON reliability. Instruction-tuned models with enough context window for the supplied research snapshot work best.
+- If a local model is slow, increase the LLM timeout in Settings rather than exposing the application publicly.
 
 ## Data and request limits
 
 - Research query: 1 to 200 characters.
-- Research sample: 1 to 50 videos per search request. YouTube's overall result count is approximate and is labeled separately from the returned sample.
-- Research enrichment: public video statistics, duration, captions, tags, language, topic categories, selected status fields, live-stream details, and public channel metadata when available. Missing or private public fields remain unavailable, never zero-filled.
-- AI evidence input: exactly the active ordered snapshot, at most 50 videos, its deterministic aggregate analytics, enrichment coverage, warnings, filters, query, retrieval time, and snapshot ID.
-- Script input: topic up to 500 characters, custom tone traits up to 300, notes up to 5,000, script or section content up to 80,000 where applicable.
-- Thumbnail references: PNG or JPEG, 128 to 4096 pixels, at most 5 MB after preparation per image, 12 MB decoded total, and no more than three references. Generic OpenAI-compatible image generation currently rejects reference-image editing as noted above.
-- Global JSON body: 18 MB, needed for bounded base64 thumbnail references. URL-encoded input is limited to 64 KB and 100 parameters.
-- Provider routes: 10 requests per client address per 60 seconds in this single-process local server.
+- Research sample: 1 to 50 videos per search request.
+- AI evidence input: exactly the active ordered snapshot, at most 50 videos, with deterministic aggregate analytics and provenance.
+- Script input: topic up to 500 characters, custom tone traits up to 300, notes up to 5,000, script/section content up to 80,000 where applicable.
+- Thumbnail references: PNG or JPEG, 128 to 4096 pixels, at most 5 MB after preparation per image, 12 MB decoded total, and no more than three references.
+- Generated image downloads are capped at 25 MB.
+- Global JSON body: 18 MB, needed for bounded base64 thumbnail references.
+- Provider routes: 10 requests per client address per 60 seconds in the local server.
 
 ## Privacy and access model
 
-- There is no login screen, initial password, Thumbnail unlock, or Pro Script Studio gate.
 - API keys stay server-side and `.env` is ignored.
-- Recent workflow history stays in the current browser profile. It is not sent to a separate history service and never contains API keys.
+- Saved secrets are never included in Settings status responses.
+- Recent workflow history stays in the current browser profile.
 - Request and response bodies are not logged.
 - The application binds to loopback unless `HOST` is explicitly changed.
-- A local AI endpoint keeps prompt/evidence traffic on the machine. Hosted endpoints receive the text prompts and research snapshot needed for the selected AI operation.
-- Do not expose the server directly to the internet. If remote access is required, add authentication and rate limiting at a trusted gateway, and disable or separately protect local Settings.
-- The in-memory rate limiter and YouTube cache are per process. They are suitable for this local-first default, not a distributed public deployment.
+- Local AI endpoints keep prompt/evidence traffic on the machine. Hosted endpoints receive the prompts and research data needed for the selected AI operation.
+- Do not expose the server directly to the internet. If remote access is required, add authentication and rate limiting at a trusted gateway and separately protect Settings.
 
 ## Commands
 
@@ -220,32 +269,30 @@ npm run build     # production client and server build
 npm start         # run the production build
 ```
 
-Continuous integration runs the test suite, TypeScript check, and production build on every pull request and push to `main`.
+Continuous integration runs the test suite, TypeScript check, and production build on pull requests and pushes to `main`.
 
 ## Technology
 
 - React 18, TypeScript, Vite, Tailwind CSS, and shadcn/ui
 - Express 5
-- OpenAI-compatible HTTP APIs (no provider SDK required for the active AI path)
+- OpenAI-compatible HTTP APIs with no provider SDK required for the active AI path
 - YouTube Data API v3
 - No server-side runtime database, session store, Passport authentication, or Replit-managed AI proxy
 
-The legacy `@google/genai` dependency and Gemini implementation remain temporarily in the repository for migration compatibility and existing provider contract tests, but the application routes use the provider-neutral OpenAI-compatible layer.
+The legacy `@google/genai` dependency and Gemini implementation remain temporarily for migration compatibility and existing provider contract tests, but active routes use the provider-neutral OpenAI-compatible layer.
 
 ## Quotas and costs
 
-The project is designed so paid AI usage is optional:
-
 | Component | Can be free/local? | Notes |
 | --- | --- | --- |
-| YouTube search/statistics | Free quota | Requires a YouTube Data API v3 key; quota limits still apply |
-| Deterministic research analytics | Yes | Computed locally from public API records |
+| YouTube search/statistics | Free quota | Requires a YouTube Data API v3 key |
+| Deterministic research analytics | Yes | Computed locally |
 | Insights / Ideas / Scripts | Yes | Use local llama.cpp or LocalAI |
-| Narration extraction | Yes | Deterministic local processing, no model call |
-| Thumbnail text suggestions | Yes | Uses your local text model |
+| Narration extraction | Yes | Deterministic local processing |
+| Thumbnail text suggestions | Yes | Uses the configured text model |
 | Generated thumbnail image | Yes, with a local image server | Otherwise use a hosted image-capable provider or leave disabled |
 
-Provider pricing and YouTube quotas change over time, so check the official documentation for your chosen endpoint before relying on a hosted cost estimate:
+Useful provider documentation:
 
 - [YouTube Data API quota costs](https://developers.google.com/youtube/v3/determine_quota_cost)
 - [llama.cpp server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server)

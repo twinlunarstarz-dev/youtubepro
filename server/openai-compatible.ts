@@ -7,24 +7,39 @@ const DEFAULT_IMAGE_SIZE = "1536x1024";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_IMAGE_TIMEOUT_MS = 300_000;
 const MAX_IMAGE_RESPONSE_BYTES = 25 * 1024 * 1024;
+const MAX_MODEL_RESULTS = 500;
 
 export interface AIProviderConfig {
+  // Backward-compatible aliases mirror the text provider.
   baseUrl: string;
   apiKey: string;
+  timeoutMs: number;
+  textBaseUrl: string;
+  textApiKey: string;
   textModel: string;
+  textTimeoutMs: number;
+  imageBaseUrl: string;
+  imageApiKey: string;
   imageModel: string;
   imageSize: string;
-  timeoutMs: number;
   imageTimeoutMs: number;
   legacyGeminiConfig: boolean;
 }
 
 export interface ConfigureAIProviderInput {
-  baseUrl?: string;
-  apiKey?: string;
+  textBaseUrl?: string;
+  textApiKey?: string;
   textModel?: string;
+  textTimeoutMs?: number;
+  imageBaseUrl?: string;
+  imageApiKey?: string;
   imageModel?: string;
   imageSize?: string;
+  imageTimeoutMs?: number;
+  // Backward-compatible shared aliases.
+  baseUrl?: string;
+  apiKey?: string;
+  timeoutMs?: number;
 }
 
 export interface ChatCompletionOptions {
@@ -33,9 +48,24 @@ export interface ChatCompletionOptions {
   maxTokens?: number;
 }
 
+export interface AIEndpointOverrides {
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  timeoutMs?: number;
+}
+
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function cleanTimeout(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1_000 || value > 1_800_000) {
+    throw new Error("AI timeouts must be whole milliseconds between 1000 and 1800000.");
+  }
+  return value;
 }
 
 export function normalizeAIBaseUrl(value: string): string {
@@ -77,30 +107,46 @@ function cleanImageSize(value: string | undefined): string {
 }
 
 function initialConfig(): AIProviderConfig {
-  const hasExplicitAIConfig = [
+  const explicitKeys = [
     "AI_BASE_URL",
     "AI_API_KEY",
+    "AI_TEXT_BASE_URL",
+    "AI_TEXT_API_KEY",
     "AI_TEXT_MODEL",
+    "AI_IMAGE_BASE_URL",
+    "AI_IMAGE_API_KEY",
     "AI_IMAGE_MODEL",
     "AI_IMAGE_SIZE",
-  ].some((key) => Object.prototype.hasOwnProperty.call(process.env, key));
+  ];
+  const hasExplicitAIConfig = explicitKeys.some((key) => Object.prototype.hasOwnProperty.call(process.env, key));
   const legacyGeminiConfig = !hasExplicitAIConfig && Boolean(process.env.GEMINI_API_KEY?.trim());
 
+  const sharedBaseUrl = process.env.AI_BASE_URL
+    || (legacyGeminiConfig ? GEMINI_OPENAI_BASE_URL : DEFAULT_LOCAL_BASE_URL);
+  const textBaseUrl = normalizeAIBaseUrl(process.env.AI_TEXT_BASE_URL || sharedBaseUrl);
+  const imageBaseUrl = normalizeAIBaseUrl(process.env.AI_IMAGE_BASE_URL || sharedBaseUrl || textBaseUrl);
+  const sharedApiKey = (process.env.AI_API_KEY ?? (legacyGeminiConfig ? process.env.GEMINI_API_KEY : ""))?.trim() || "";
+
+  const textApiKey = (process.env.AI_TEXT_API_KEY ?? sharedApiKey).trim();
+  const textTimeoutMs = parsePositiveInt(process.env.AI_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+
   return {
-    baseUrl: normalizeAIBaseUrl(
-      process.env.AI_BASE_URL
-        || (legacyGeminiConfig ? GEMINI_OPENAI_BASE_URL : DEFAULT_LOCAL_BASE_URL),
-    ),
-    apiKey: (process.env.AI_API_KEY ?? (legacyGeminiConfig ? process.env.GEMINI_API_KEY : ""))?.trim() || "",
+    baseUrl: textBaseUrl,
+    apiKey: textApiKey,
+    timeoutMs: textTimeoutMs,
+    textBaseUrl,
+    textApiKey,
     textModel: cleanModel(
       process.env.AI_TEXT_MODEL ?? (legacyGeminiConfig ? process.env.GEMINI_TEXT_MODEL : undefined),
       DEFAULT_TEXT_MODEL,
     ),
+    textTimeoutMs,
+    imageBaseUrl,
+    imageApiKey: (process.env.AI_IMAGE_API_KEY ?? sharedApiKey).trim(),
     imageModel: cleanModel(
       process.env.AI_IMAGE_MODEL ?? (legacyGeminiConfig ? process.env.GEMINI_IMAGE_MODEL : undefined),
     ),
     imageSize: cleanImageSize(process.env.AI_IMAGE_SIZE),
-    timeoutMs: parsePositiveInt(process.env.AI_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     imageTimeoutMs: parsePositiveInt(process.env.AI_IMAGE_TIMEOUT_MS, DEFAULT_IMAGE_TIMEOUT_MS),
     legacyGeminiConfig,
   };
@@ -113,25 +159,68 @@ export function getAIProviderConfig(): AIProviderConfig {
 }
 
 export function configureAIProvider(input: ConfigureAIProviderInput): AIProviderConfig {
+  const sharedBaseUrl = input.baseUrl !== undefined ? normalizeAIBaseUrl(input.baseUrl) : undefined;
+  const sharedApiKey = input.apiKey !== undefined ? input.apiKey.trim() : undefined;
+  const sharedTimeoutMs = input.timeoutMs !== undefined
+    ? cleanTimeout(input.timeoutMs, providerConfig.textTimeoutMs)
+    : undefined;
+
+  const nextTextBaseUrl = input.textBaseUrl !== undefined
+    ? normalizeAIBaseUrl(input.textBaseUrl)
+    : sharedBaseUrl ?? providerConfig.textBaseUrl;
+  const nextTextApiKey = input.textApiKey !== undefined
+    ? input.textApiKey.trim()
+    : sharedApiKey ?? providerConfig.textApiKey;
+  const nextTextTimeoutMs = input.textTimeoutMs !== undefined
+    ? cleanTimeout(input.textTimeoutMs, providerConfig.textTimeoutMs)
+    : sharedTimeoutMs ?? providerConfig.textTimeoutMs;
+
   providerConfig = {
     ...providerConfig,
-    ...(input.baseUrl !== undefined ? { baseUrl: normalizeAIBaseUrl(input.baseUrl) } : {}),
-    ...(input.apiKey !== undefined ? { apiKey: input.apiKey.trim() } : {}),
-    ...(input.textModel !== undefined ? { textModel: cleanModel(input.textModel, DEFAULT_TEXT_MODEL) } : {}),
-    ...(input.imageModel !== undefined ? { imageModel: cleanModel(input.imageModel) } : {}),
-    ...(input.imageSize !== undefined ? { imageSize: cleanImageSize(input.imageSize) } : {}),
+    baseUrl: nextTextBaseUrl,
+    apiKey: nextTextApiKey,
+    timeoutMs: nextTextTimeoutMs,
+    textBaseUrl: nextTextBaseUrl,
+    textApiKey: nextTextApiKey,
+    textModel: input.textModel !== undefined
+      ? cleanModel(input.textModel, DEFAULT_TEXT_MODEL)
+      : providerConfig.textModel,
+    textTimeoutMs: nextTextTimeoutMs,
+    imageBaseUrl: input.imageBaseUrl !== undefined
+      ? normalizeAIBaseUrl(input.imageBaseUrl)
+      : sharedBaseUrl ?? providerConfig.imageBaseUrl,
+    imageApiKey: input.imageApiKey !== undefined
+      ? input.imageApiKey.trim()
+      : sharedApiKey ?? providerConfig.imageApiKey,
+    imageModel: input.imageModel !== undefined
+      ? cleanModel(input.imageModel)
+      : providerConfig.imageModel,
+    imageSize: input.imageSize !== undefined
+      ? cleanImageSize(input.imageSize)
+      : providerConfig.imageSize,
+    imageTimeoutMs: input.imageTimeoutMs !== undefined
+      ? cleanTimeout(input.imageTimeoutMs, providerConfig.imageTimeoutMs)
+      : providerConfig.imageTimeoutMs,
     legacyGeminiConfig: false,
   };
 
-  process.env.AI_BASE_URL = providerConfig.baseUrl;
-  process.env.AI_API_KEY = providerConfig.apiKey;
+  // Persist active runtime values into process.env. Split values take precedence,
+  // while the shared aliases remain useful to older installs and scripts.
+  process.env.AI_TEXT_BASE_URL = providerConfig.textBaseUrl;
+  process.env.AI_TEXT_API_KEY = providerConfig.textApiKey;
   process.env.AI_TEXT_MODEL = providerConfig.textModel;
+  process.env.AI_TIMEOUT_MS = String(providerConfig.textTimeoutMs);
+  process.env.AI_IMAGE_BASE_URL = providerConfig.imageBaseUrl;
+  process.env.AI_IMAGE_API_KEY = providerConfig.imageApiKey;
   process.env.AI_IMAGE_MODEL = providerConfig.imageModel;
   process.env.AI_IMAGE_SIZE = providerConfig.imageSize;
+  process.env.AI_IMAGE_TIMEOUT_MS = String(providerConfig.imageTimeoutMs);
+  process.env.AI_BASE_URL = providerConfig.textBaseUrl;
+  process.env.AI_API_KEY = providerConfig.textApiKey;
   return getAIProviderConfig();
 }
 
-export function isLocalAIEndpoint(baseUrl = providerConfig.baseUrl): boolean {
+export function isLocalAIEndpoint(baseUrl = providerConfig.textBaseUrl): boolean {
   try {
     const hostname = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
     if (hostname === "localhost" || hostname === "::1" || hostname.endsWith(".local")) return true;
@@ -143,19 +232,16 @@ export function isLocalAIEndpoint(baseUrl = providerConfig.baseUrl): boolean {
   }
 }
 
-function endpointUrl(path: string): string {
-  return `${providerConfig.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
+function endpointUrl(baseUrl: string, path: string): string {
+  return `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 function getProviderMessage(body: unknown): string {
   if (!body || typeof body !== "object") return "";
   const record = body as Record<string, any>;
-  return [
-    record.error?.message,
-    record.error?.code,
-    record.message,
-    record.detail,
-  ].filter((value): value is string => typeof value === "string").join(" ");
+  return [record.error?.message, record.error?.code, record.message, record.detail]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
 }
 
 function httpProviderError(status: number, body: unknown, operation: string): ProviderError {
@@ -205,21 +291,25 @@ function httpProviderError(status: number, body: unknown, operation: string): Pr
   });
 }
 
-async function postJson(
+async function requestJson(
+  method: "GET" | "POST",
+  baseUrl: string,
+  apiKey: string,
   path: string,
-  body: Record<string, unknown>,
   operation: string,
   timeoutMs: number,
+  body?: Record<string, unknown>,
 ): Promise<{ response: Response; body: unknown }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (providerConfig.apiKey) headers.Authorization = `Bearer ${providerConfig.apiKey}`;
-    const response = await fetch(endpointUrl(path), {
-      method: "POST",
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (body) headers["Content-Type"] = "application/json";
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const response = await fetch(endpointUrl(baseUrl, path), {
+      method,
       headers,
-      body: JSON.stringify(body),
+      ...(body ? { body: JSON.stringify(body) } : {}),
       signal: controller.signal,
     });
 
@@ -228,9 +318,7 @@ async function postJson(
     try {
       parsed = text ? JSON.parse(text) : {};
     } catch (cause) {
-      if (!response.ok) {
-        throw httpProviderError(response.status, { message: text.slice(0, 300) }, operation);
-      }
+      if (!response.ok) throw httpProviderError(response.status, { message: text.slice(0, 300) }, operation);
       throw new ProviderError({
         message: `The AI endpoint returned malformed JSON during ${operation}.`,
         category: "invalid_response",
@@ -266,6 +354,17 @@ async function postJson(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function postJson(
+  baseUrl: string,
+  apiKey: string,
+  path: string,
+  body: Record<string, unknown>,
+  operation: string,
+  timeoutMs: number,
+): Promise<{ response: Response; body: unknown }> {
+  return requestJson("POST", baseUrl, apiKey, path, operation, timeoutMs, body);
 }
 
 function contentToText(content: unknown): string {
@@ -340,7 +439,14 @@ export async function chatCompletion(prompt: string, options: ChatCompletionOpti
     : baseBody;
 
   try {
-    const result = await postJson("/chat/completions", structuredBody, "chat completion", providerConfig.timeoutMs);
+    const result = await postJson(
+      providerConfig.textBaseUrl,
+      providerConfig.textApiKey,
+      "/chat/completions",
+      structuredBody,
+      "chat completion",
+      providerConfig.textTimeoutMs,
+    );
     const text = parseChatResponse(result.body);
     return options.json ? extractJsonPayload(text) : text;
   } catch (error) {
@@ -349,9 +455,81 @@ export async function chatCompletion(prompt: string, options: ChatCompletionOpti
       && error.code === "AI_REQUEST_REJECTED";
     if (!canRetryWithoutResponseFormat) throw error;
 
-    const result = await postJson("/chat/completions", baseBody, "chat completion", providerConfig.timeoutMs);
+    const result = await postJson(
+      providerConfig.textBaseUrl,
+      providerConfig.textApiKey,
+      "/chat/completions",
+      baseBody,
+      "chat completion",
+      providerConfig.textTimeoutMs,
+    );
     return extractJsonPayload(parseChatResponse(result.body));
   }
+}
+
+function resolveEndpoint(kind: "text" | "image", overrides: AIEndpointOverrides = {}) {
+  const currentBaseUrl = kind === "text" ? providerConfig.textBaseUrl : providerConfig.imageBaseUrl;
+  const currentApiKey = kind === "text" ? providerConfig.textApiKey : providerConfig.imageApiKey;
+  const currentModel = kind === "text" ? providerConfig.textModel : providerConfig.imageModel;
+  const currentTimeout = kind === "text" ? providerConfig.textTimeoutMs : providerConfig.imageTimeoutMs;
+  return {
+    baseUrl: overrides.baseUrl !== undefined ? normalizeAIBaseUrl(overrides.baseUrl) : currentBaseUrl,
+    apiKey: overrides.apiKey !== undefined ? overrides.apiKey.trim() : currentApiKey,
+    model: overrides.model !== undefined ? cleanModel(overrides.model) : currentModel,
+    timeoutMs: overrides.timeoutMs !== undefined ? cleanTimeout(overrides.timeoutMs, currentTimeout) : currentTimeout,
+  };
+}
+
+export async function listAIModels(
+  kind: "text" | "image",
+  overrides: AIEndpointOverrides = {},
+): Promise<string[]> {
+  const endpoint = resolveEndpoint(kind, overrides);
+  const result = await requestJson(
+    "GET",
+    endpoint.baseUrl,
+    endpoint.apiKey,
+    "/models",
+    `${kind} model discovery`,
+    endpoint.timeoutMs,
+  );
+  const record = result.body as any;
+  const data: unknown[] = Array.isArray(record?.data) ? record.data : Array.isArray(record?.models) ? record.models : [];
+  const models: string[] = data
+    .map((item: unknown) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return "";
+      const row = item as Record<string, unknown>;
+      return typeof row.id === "string" ? row.id : typeof row.name === "string" ? row.name : "";
+    })
+    .map((value: string) => value.trim())
+    .filter((value: string) => value.length > 0 && value.length <= 256 && !/[\r\n\0]/.test(value));
+  return Array.from(new Set(models)).slice(0, MAX_MODEL_RESULTS);
+}
+
+export async function testAITextConnection(overrides: AIEndpointOverrides = {}) {
+  const endpoint = resolveEndpoint("text", overrides);
+  if (!endpoint.model) throw new Error("AI text model is required for a connection test.");
+  const startedAt = Date.now();
+  const result = await postJson(
+    endpoint.baseUrl,
+    endpoint.apiKey,
+    "/chat/completions",
+    {
+      model: endpoint.model,
+      messages: [{ role: "user", content: "Reply with exactly OK." }],
+      stream: false,
+    },
+    "connection test",
+    endpoint.timeoutMs,
+  );
+  const text = parseChatResponse(result.body);
+  return {
+    ok: true as const,
+    model: endpoint.model,
+    latencyMs: Date.now() - startedAt,
+    responsePreview: text.slice(0, 120),
+  };
 }
 
 async function fetchImageUrl(urlValue: string): Promise<string> {
@@ -359,7 +537,7 @@ async function fetchImageUrl(urlValue: string): Promise<string> {
 
   let resolvedUrl: URL;
   try {
-    resolvedUrl = new URL(urlValue, `${providerConfig.baseUrl}/`);
+    resolvedUrl = new URL(urlValue, `${providerConfig.imageBaseUrl}/`);
   } catch {
     throw new ProviderError({
       message: "The AI endpoint returned an invalid image URL.",
@@ -382,7 +560,12 @@ async function fetchImageUrl(urlValue: string): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), providerConfig.imageTimeoutMs);
   try {
-    const response = await fetch(resolvedUrl, { signal: controller.signal });
+    const headers: Record<string, string> = {};
+    const providerOrigin = new URL(providerConfig.imageBaseUrl).origin;
+    if (providerConfig.imageApiKey && resolvedUrl.origin === providerOrigin) {
+      headers.Authorization = `Bearer ${providerConfig.imageApiKey}`;
+    }
+    const response = await fetch(resolvedUrl, { headers, signal: controller.signal });
     if (!response.ok) throw httpProviderError(response.status, {}, "image download");
     const contentType = (response.headers.get("content-type") || "image/png").split(";")[0].trim();
     if (!contentType.startsWith("image/")) {
@@ -479,9 +662,11 @@ export async function generateImage(prompt: string): Promise<{ imageData: string
     size: providerConfig.imageSize,
   };
 
-  let result;
+  let result: { response: Response; body: unknown };
   try {
     result = await postJson(
+      providerConfig.imageBaseUrl,
+      providerConfig.imageApiKey,
       "/images/generations",
       { ...baseBody, response_format: "b64_json" },
       "image generation",
@@ -490,7 +675,14 @@ export async function generateImage(prompt: string): Promise<{ imageData: string
   } catch (error) {
     const canRetry = error instanceof ProviderError && error.code === "AI_REQUEST_REJECTED";
     if (!canRetry) throw error;
-    result = await postJson("/images/generations", baseBody, "image generation", providerConfig.imageTimeoutMs);
+    result = await postJson(
+      providerConfig.imageBaseUrl,
+      providerConfig.imageApiKey,
+      "/images/generations",
+      baseBody,
+      "image generation",
+      providerConfig.imageTimeoutMs,
+    );
   }
 
   const parsed = parseImageResponse(result.body);

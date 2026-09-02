@@ -26,8 +26,17 @@ import {
   titleRegenerationRequestSchema,
 } from "./api-contracts";
 import { createRateLimiter } from "./rate-limit";
+import { listAIModels, testAITextConnection } from "./openai-compatible";
 
 const { middleware: rateLimit } = createRateLimiter();
+
+const aiEndpointProbeSchema = z.object({
+  kind: z.enum(["text", "image"]),
+  baseUrl: z.string().trim().min(8).max(2_048).optional(),
+  apiKey: z.string().trim().max(2_048).optional(),
+  model: z.string().trim().max(256).optional(),
+  timeoutMs: z.number().int().min(1_000).max(1_800_000).optional(),
+}).strict();
 
 function getUserFriendlyError(error: any, context: string): { message: string; suggestion: string } {
   const providerError = normalizeProviderError(error, "ai");
@@ -55,23 +64,25 @@ function getUserFriendlyError(error: any, context: string): { message: string; s
   };
 }
 
+function requireLocalSettings(req: Parameters<typeof isLocalSettingsRequest>[0], res: any): boolean {
+  if (isLocalSettingsRequest(req)) return true;
+  res.status(403).json({ error: "Settings are available only from this machine." });
+  return false;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
 ): Promise<Server> {
   app.get("/api/settings/status", (req, res) => {
     res.setHeader("Cache-Control", "no-store");
-    if (!isLocalSettingsRequest(req)) {
-      return res.status(403).json({ error: "Settings are available only from this machine." });
-    }
+    if (!requireLocalSettings(req, res)) return;
     return res.json(getApiKeyStatus());
   });
 
   app.put("/api/settings/api-keys", async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
-    if (!isLocalSettingsRequest(req)) {
-      return res.status(403).json({ error: "Settings are available only from this machine." });
-    }
+    if (!requireLocalSettings(req, res)) return;
 
     try {
       const input = apiKeySettingsSchema.parse(req.body);
@@ -79,6 +90,44 @@ export async function registerRoutes(
       return res.json({ success: true, status });
     } catch (error: any) {
       return res.status(400).json({ error: error?.message || "Unable to save API settings." });
+    }
+  });
+
+  app.post("/api/settings/ai/models", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (!requireLocalSettings(req, res)) return;
+    try {
+      const input = aiEndpointProbeSchema.parse(req.body);
+      const models = await listAIModels(input.kind, {
+        ...(input.baseUrl !== undefined ? { baseUrl: input.baseUrl } : {}),
+        ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
+        ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      });
+      return res.json({ models });
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return res.status(400).json({ error: "Invalid model-discovery settings.", details: error.errors });
+      const providerError = normalizeProviderError(error, "ai");
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+    }
+  });
+
+  app.post("/api/settings/ai/test", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (!requireLocalSettings(req, res)) return;
+    try {
+      const input = aiEndpointProbeSchema.parse(req.body);
+      if (input.kind !== "text") return res.status(400).json({ error: "Only LLM chat connections use the inference test. Use model discovery for image endpoints." });
+      const result = await testAITextConnection({
+        ...(input.baseUrl !== undefined ? { baseUrl: input.baseUrl } : {}),
+        ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      });
+      return res.json(result);
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return res.status(400).json({ error: "Invalid connection-test settings.", details: error.errors });
+      const providerError = normalizeProviderError(error, "ai");
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
