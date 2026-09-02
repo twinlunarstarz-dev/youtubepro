@@ -13,6 +13,7 @@ const app = express();
 const httpServer = createServer(app);
 
 app.disable("x-powered-by");
+app.set("trust proxy", false);
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -27,15 +28,7 @@ app.use((_req, res, next) => {
   next();
 });
 
-app.use(
-  express.json({
-    // Three prepared thumbnail references may contain up to 12 MB of decoded
-    // image data. Base64 and JSON framing require some headroom, but no active
-    // request needs the former 50 MB process-wide allowance.
-    limit: "18mb",
-  }),
-);
-
+app.use(express.json({ limit: "18mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb", parameterLimit: 100 }));
 
 export function log(message: string, source = "express") {
@@ -45,27 +38,67 @@ export function log(message: string, source = "express") {
     second: "2-digit",
     hour12: true,
   });
-
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
 app.use((req, res, next) => {
   const start = Date.now();
-  const path = req.path;
-
+  const requestPath = req.path;
   res.on("finish", () => {
-    const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
+    if (requestPath.startsWith("/api")) {
       // Never log response bodies. They may contain generated images, user
-      // scripts, research payloads, or other private workspace content.
-      log(`${req.method} ${path} ${res.statusCode} in ${duration}ms`);
+      // scripts, transcripts, research payloads, or private workspace content.
+      log(`${req.method} ${requestPath} ${res.statusCode} in ${Date.now() - start}ms`);
     }
   });
-
   next();
 });
 
-(async () => {
+function configuredPort(): number {
+  const raw = (process.env.PORT || "5000").trim();
+  if (!/^\d+$/.test(raw)) throw new Error(`PORT must be a whole number from 1 to 65535; received ${JSON.stringify(raw)}.`);
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`PORT must be a whole number from 1 to 65535; received ${JSON.stringify(raw)}.`);
+  }
+  return port;
+}
+
+function configuredHost(): string {
+  const host = (process.env.HOST || "127.0.0.1").trim();
+  if (!host || host.length > 255 || /[\r\n\0]/.test(host)) throw new Error("HOST is invalid.");
+  return host;
+}
+
+function installGracefulShutdown() {
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`${signal} received; closing the HTTP server.`, "server");
+    const forced = setTimeout(() => {
+      log("graceful shutdown timed out; closing remaining connections.", "server");
+      httpServer.closeAllConnections?.();
+      process.exit(1);
+    }, 5_000);
+    forced.unref();
+
+    httpServer.close((error) => {
+      clearTimeout(forced);
+      if (error) {
+        console.error("Failed to close the HTTP server cleanly:", error);
+        process.exit(1);
+      }
+      log("HTTP server closed.", "server");
+      process.exit(0);
+    });
+  };
+
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+async function main() {
   const { registerRoutes } = await import("./routes");
   await registerRoutes(httpServer, app);
 
@@ -74,16 +107,12 @@ app.use((req, res, next) => {
   });
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
+    const candidate = Number.isInteger(err?.status) ? err.status : Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+    const status = candidate >= 400 && candidate <= 599 ? candidate : 500;
     log(`unhandled request error (${status})`, "express");
-    if (!res.headersSent) {
-      res.status(status).json({ message: "Internal Server Error" });
-    }
+    if (!res.headersSent) res.status(status).json({ message: "Internal Server Error" });
   });
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
@@ -91,32 +120,24 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // Serve on the port from the environment, defaulting to 5000.
-  // Bind loopback by default. This app holds a billable YouTube API key and the
-  // host it runs on opens 1025-65535/tcp inbound, so binding 0.0.0.0 put it on
-  // the LAN with no authentication in front of it. Set HOST explicitly if this
-  // ever needs to be reachable from another machine.
-  const port = parseInt(process.env.PORT || "5000", 10);
-  const host = process.env.HOST || "127.0.0.1";
-  // Keep port sharing disabled. A second local instance must fail clearly
-  // instead of distributing requests between stale development and production
-  // servers.
+  const port = configuredPort();
+  const host = configuredHost();
   httpServer.once("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "EADDRINUSE") {
-      log(
-        `could not start on ${host}:${port}; the address is already in use. Stop the existing YouTube Pro server or set PORT to a free port.`,
-      );
+      log(`could not start on ${host}:${port}; the address is already in use. Stop the existing YouTube Pro server or set PORT to a free port.`, "server");
       process.exit(1);
     }
-    throw error;
+    console.error("HTTP server error:", error);
+    process.exit(1);
   });
-  httpServer.listen(
-    {
-      port,
-      host,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
-})();
+
+  httpServer.listen({ port, host }, () => {
+    installGracefulShutdown();
+    log(`serving on http://${host}:${port}`, "server");
+  });
+}
+
+void main().catch((error) => {
+  console.error("YouTube Pro failed to start:", error);
+  process.exitCode = 1;
+});

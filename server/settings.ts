@@ -8,11 +8,17 @@ import {
   isLocalAIEndpoint,
   normalizeAIBaseUrl,
 } from "./openai-compatible";
+import { clearYouTubeSearchCache } from "./youtube-cache";
+import { getYouTubeSourceConfig, YOUTUBE_SOURCE_MODES, type YouTubeSourceMode } from "./youtube-source";
+import { clearYtDlpAvailabilityCache } from "./ytdlp";
 
 const ENV_PATH = path.resolve(process.cwd(), ".env");
 const ENV_TEMP_PATH = path.resolve(process.cwd(), ".env.tmp");
 const SUPPORTED_KEYS = [
   "YOUTUBE_API_KEY",
+  "YOUTUBE_SOURCE",
+  "YTDLP_PATH",
+  "YTDLP_TIMEOUT_MS",
   "AI_BASE_URL",
   "AI_API_KEY",
   "AI_TEXT_BASE_URL",
@@ -31,6 +37,9 @@ type SupportedKey = (typeof SUPPORTED_KEYS)[number];
 export interface ApiKeySettings {
   youtubeApiKey?: string;
   clearYoutubeApiKey?: boolean;
+  youtubeSource?: YouTubeSourceMode;
+  ytdlpPath?: string;
+  ytdlpTimeoutMs?: number;
   aiTextBaseUrl?: string;
   aiTextApiKey?: string;
   clearAiTextApiKey?: boolean;
@@ -55,10 +64,15 @@ const optionalImageModelSchema = z.string().trim().max(256)
 const timeoutSchema = z.number().int().min(1_000).max(1_800_000);
 const baseUrlSchema = z.string().trim().min(8).max(2_048);
 const secretSchema = z.string().trim().min(1).max(2_048);
+const executablePathSchema = z.string().trim().min(1).max(1_024)
+  .refine((value) => !/[\r\n\0]/.test(value), "yt-dlp path contains unsupported characters.");
 
 export const apiKeySettingsSchema = z.object({
   youtubeApiKey: z.string().trim().min(8).max(512).optional(),
   clearYoutubeApiKey: z.boolean().optional(),
+  youtubeSource: z.enum(YOUTUBE_SOURCE_MODES).optional(),
+  ytdlpPath: executablePathSchema.optional(),
+  ytdlpTimeoutMs: timeoutSchema.optional(),
   aiTextBaseUrl: baseUrlSchema.optional(),
   aiTextApiKey: secretSchema.optional(),
   clearAiTextApiKey: z.boolean().optional(),
@@ -157,6 +171,7 @@ export function getApiKeyStatus() {
   const ai = getAIProviderConfig();
   return {
     youtube: Boolean(process.env.YOUTUBE_API_KEY?.trim()),
+    research: getYouTubeSourceConfig(),
     ai: {
       legacyGeminiConfig: ai.legacyGeminiConfig,
       text: {
@@ -232,6 +247,15 @@ export async function saveApiKeySettings(input: ApiKeySettings) {
   assertReplacementAndClear(textApiKey, clearTextKey, "LLM API key");
   assertReplacementAndClear(imageApiKey, clearImageKey, "Image API key");
 
+  const currentResearch = getYouTubeSourceConfig();
+  const youtubeSource = input.youtubeSource ?? currentResearch.mode;
+  const ytdlpPath = (input.ytdlpPath ?? currentResearch.ytdlpPath).trim();
+  const ytdlpTimeoutMs = input.ytdlpTimeoutMs ?? currentResearch.ytdlpTimeoutMs;
+  if (!ytdlpPath || /[\r\n\0]/.test(ytdlpPath)) throw new Error("yt-dlp path is invalid.");
+  if (!Number.isInteger(ytdlpTimeoutMs) || ytdlpTimeoutMs < 1_000 || ytdlpTimeoutMs > 1_800_000) {
+    throw new Error("yt-dlp timeout must be between 1000 and 1800000 milliseconds.");
+  }
+
   const current = getAIProviderConfig();
   const textBaseUrl = normalizeAIBaseUrl(input.aiTextBaseUrl ?? input.aiBaseUrl ?? current.textBaseUrl);
   const imageBaseUrl = normalizeAIBaseUrl(input.aiImageBaseUrl ?? input.aiBaseUrl ?? current.imageBaseUrl);
@@ -264,6 +288,9 @@ export async function saveApiKeySettings(input: ApiKeySettings) {
   }
 
   contents = setEnvValue(contents, "YOUTUBE_API_KEY", effectiveYoutubeKey);
+  contents = setEnvValue(contents, "YOUTUBE_SOURCE", youtubeSource);
+  contents = setEnvValue(contents, "YTDLP_PATH", ytdlpPath);
+  contents = setEnvValue(contents, "YTDLP_TIMEOUT_MS", String(ytdlpTimeoutMs));
   contents = setEnvValue(contents, "AI_TEXT_BASE_URL", textBaseUrl);
   contents = setEnvValue(contents, "AI_TEXT_API_KEY", effectiveTextKey);
   contents = setEnvValue(contents, "AI_TEXT_MODEL", textModel);
@@ -282,6 +309,11 @@ export async function saveApiKeySettings(input: ApiKeySettings) {
   await chmod(ENV_PATH, 0o600);
 
   process.env.YOUTUBE_API_KEY = effectiveYoutubeKey;
+  process.env.YOUTUBE_SOURCE = youtubeSource;
+  process.env.YTDLP_PATH = ytdlpPath;
+  process.env.YTDLP_TIMEOUT_MS = String(ytdlpTimeoutMs);
+  clearYouTubeSearchCache();
+  clearYtDlpAvailabilityCache();
   configureAIProvider({
     textBaseUrl,
     textApiKey: effectiveTextKey,

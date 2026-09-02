@@ -1,6 +1,7 @@
 import { FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import {
   BrainCircuit,
+  Database,
   ExternalLink,
   Eye,
   EyeOff,
@@ -12,6 +13,7 @@ import {
   ShieldCheck,
   Sparkles,
   Wifi,
+  Wrench,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -20,8 +22,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+
+type YouTubeSourceMode = "auto" | "api" | "ytdlp";
 
 interface ProviderStatus {
   apiKeyConfigured: boolean;
@@ -33,10 +44,38 @@ interface ProviderStatus {
 
 interface ApiKeyStatus {
   youtube: boolean;
+  research: {
+    mode: YouTubeSourceMode;
+    dataApiConfigured: boolean;
+    ytdlpPath: string;
+    ytdlpTimeoutMs: number;
+  };
   ai: {
     legacyGeminiConfig: boolean;
     text: ProviderStatus;
     image: ProviderStatus & { imageSize: string };
+  };
+}
+
+interface Diagnostics {
+  research: ApiKeyStatus["research"] & {
+    preferred: "youtube-data-api-v3" | "yt-dlp" | "unavailable";
+    ytdlp: {
+      available: boolean;
+      executable: string;
+      version?: string;
+      checkedAt: string;
+      error?: string;
+    };
+  };
+  cache: {
+    size: number;
+    maxEntries: number;
+    ttlMs: number;
+    hits: number;
+    misses: number;
+    evictions: number;
+    hitRate: number;
   };
 }
 
@@ -61,6 +100,12 @@ interface ModelDiscoveryState {
 
 const DEFAULT_STATUS: ApiKeyStatus = {
   youtube: false,
+  research: {
+    mode: "auto",
+    dataApiConfigured: false,
+    ytdlpPath: "yt-dlp",
+    ytdlpTimeoutMs: 120000,
+  },
   ai: {
     legacyGeminiConfig: false,
     text: {
@@ -141,7 +186,7 @@ function SecretField({
           type={showKey ? "text" : "password"}
           autoComplete="off"
           spellCheck={false}
-          placeholder={configured ? "Leave blank to keep saved key" : "Optional for keyless local servers"}
+          placeholder={configured ? "Leave blank to keep saved key" : "Optional when this connection is keyless"}
           className="pr-11 font-mono"
           data-testid={`input-${id}`}
           disabled={clearChecked}
@@ -182,6 +227,13 @@ async function postSettingsJson<T>(url: string, body: Record<string, unknown>): 
   return data as T;
 }
 
+async function getSettingsJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { cache: "no-store" });
+  const data = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : "Request failed.");
+  return data as T;
+}
+
 function ModelChoices({ models, activeModel, onChoose }: { models: string[]; activeModel: string; onChoose: (model: string) => void }) {
   if (models.length === 0) return null;
   return (
@@ -209,8 +261,19 @@ function ModelChoices({ models, activeModel, onChoose }: { models: string[]; act
   );
 }
 
+function researchSourceLabel(preferred: Diagnostics["research"]["preferred"]): string {
+  if (preferred === "youtube-data-api-v3") return "Official Data API";
+  if (preferred === "yt-dlp") return "Local yt-dlp";
+  return "No source available";
+}
+
 export default function SettingsPage() {
   const [status, setStatus] = useState<ApiKeyStatus>(DEFAULT_STATUS);
+  const [youtubeSource, setYoutubeSource] = useState<YouTubeSourceMode>(DEFAULT_STATUS.research.mode);
+  const [ytdlpPath, setYtdlpPath] = useState(DEFAULT_STATUS.research.ytdlpPath);
+  const [ytdlpTimeoutMs, setYtdlpTimeoutMs] = useState(String(DEFAULT_STATUS.research.ytdlpTimeoutMs));
+  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+  const [checkingDiagnostics, setCheckingDiagnostics] = useState(false);
   const [textBaseUrl, setTextBaseUrl] = useState(DEFAULT_STATUS.ai.text.baseUrl);
   const [textModel, setTextModel] = useState(DEFAULT_STATUS.ai.text.model);
   const [textTimeoutMs, setTextTimeoutMs] = useState(String(DEFAULT_STATUS.ai.text.timeoutMs));
@@ -235,6 +298,9 @@ export default function SettingsPage() {
 
   const applyStatus = (nextStatus: ApiKeyStatus) => {
     setStatus(nextStatus);
+    setYoutubeSource(nextStatus.research.mode);
+    setYtdlpPath(nextStatus.research.ytdlpPath);
+    setYtdlpTimeoutMs(String(nextStatus.research.ytdlpTimeoutMs));
     setTextBaseUrl(nextStatus.ai.text.baseUrl);
     setTextModel(nextStatus.ai.text.model);
     setTextTimeoutMs(String(nextStatus.ai.text.timeoutMs));
@@ -248,20 +314,35 @@ export default function SettingsPage() {
     setTextTestResult(null);
   };
 
+  const loadDiagnostics = async () => {
+    setCheckingDiagnostics(true);
+    try {
+      setDiagnostics(await getSettingsJson<Diagnostics>("/api/settings/diagnostics"));
+    } catch (error: any) {
+      toast({ title: "Local diagnostics unavailable", description: error?.message || "Could not check yt-dlp and the research cache.", variant: "destructive" });
+    } finally {
+      setCheckingDiagnostics(false);
+    }
+  };
+
   useEffect(() => {
+    let cancelled = false;
     const loadStatus = async () => {
       try {
-        const response = await fetch("/api/settings/status", { cache: "no-store" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Unable to load settings.");
-        applyStatus(data as ApiKeyStatus);
+        const data = await getSettingsJson<ApiKeyStatus>("/api/settings/status");
+        if (cancelled) return;
+        applyStatus(data);
       } catch (error: any) {
-        setLoadError(error?.message || "Unable to load settings.");
+        if (!cancelled) setLoadError(error?.message || "Unable to load settings.");
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          void loadDiagnostics();
+        }
       }
     };
     void loadStatus();
+    return () => { cancelled = true; };
   }, []);
 
   const buildProbeBody = (kind: "text" | "image") => {
@@ -305,9 +386,14 @@ export default function SettingsPage() {
     const youtubeApiKey = clearYoutubeKey ? "" : youtubeKeyRef.current?.value.trim() || "";
     const aiTextApiKey = clearTextKey ? "" : textKeyRef.current?.value.trim() || "";
     const aiImageApiKey = clearImageKey ? "" : imageKeyRef.current?.value.trim() || "";
+    const ytdlpTimeout = Number(ytdlpTimeoutMs);
     const textTimeout = Number(textTimeoutMs);
     const imageTimeout = Number(imageTimeoutMs);
 
+    if (!Number.isInteger(ytdlpTimeout) || ytdlpTimeout < 1000 || ytdlpTimeout > 1800000) {
+      toast({ title: "Invalid yt-dlp timeout", description: "Use a whole number from 1000 to 1800000 milliseconds.", variant: "destructive" });
+      return;
+    }
     if (!Number.isInteger(textTimeout) || textTimeout < 1000 || textTimeout > 1800000) {
       toast({ title: "Invalid LLM timeout", description: "Use a whole number from 1000 to 1800000 milliseconds.", variant: "destructive" });
       return;
@@ -322,6 +408,9 @@ export default function SettingsPage() {
       const response = await apiRequest("PUT", "/api/settings/api-keys", {
         ...(youtubeApiKey ? { youtubeApiKey } : {}),
         ...(clearYoutubeKey ? { clearYoutubeApiKey: true } : {}),
+        youtubeSource,
+        ytdlpPath: ytdlpPath.trim(),
+        ytdlpTimeoutMs: ytdlpTimeout,
         ...(aiTextApiKey ? { aiTextApiKey } : {}),
         ...(clearTextKey ? { clearAiTextApiKey: true } : {}),
         aiTextBaseUrl: textBaseUrl.trim(),
@@ -339,7 +428,8 @@ export default function SettingsPage() {
       if (youtubeKeyRef.current) youtubeKeyRef.current.value = "";
       if (textKeyRef.current) textKeyRef.current.value = "";
       if (imageKeyRef.current) imageKeyRef.current.value = "";
-      toast({ title: "Connection settings saved", description: "LLM, image generation, and YouTube settings are active immediately." });
+      void loadDiagnostics();
+      toast({ title: "Connection settings saved", description: "Research, LLM, image generation, and YouTube settings are active immediately." });
     } catch (error: any) {
       toast({ title: "Could not save settings", description: error?.message || "Check the endpoints and try again.", variant: "destructive" });
     } finally {
@@ -352,14 +442,14 @@ export default function SettingsPage() {
       <div>
         <div className="flex items-center gap-2 text-primary"><KeyRound className="h-5 w-5" /><span className="text-sm font-medium">Provider configuration</span></div>
         <h1 className="mt-2 text-3xl font-bold">Settings</h1>
-        <p className="mt-2 max-w-3xl text-muted-foreground">Configure every model-facing connection from the UI. Text and image generation can use the same OpenAI-compatible server or completely different providers.</p>
+        <p className="mt-2 max-w-3xl text-muted-foreground">Configure every external connection from one place. Research can use the official YouTube API, local yt-dlp, or automatic fallback; text and image generation can use different OpenAI-compatible providers.</p>
       </div>
 
       <Alert>
         <ShieldCheck className="h-4 w-4" />
         <AlertTitle>Secrets stay server-side</AlertTitle>
         <AlertDescription>
-          Keys are written to the ignored local <code>.env</code> file with owner-only permissions. Saved secrets are never returned to the browser. These controls are accepted only from a direct loopback, same-origin request.
+          Keys are written to the ignored local <code>.env</code> file with owner-only permissions. Saved secrets are never returned to the browser. These controls and diagnostics are accepted only from a direct loopback, same-origin request.
         </AlertDescription>
       </Alert>
 
@@ -368,24 +458,80 @@ export default function SettingsPage() {
       <form onSubmit={handleSubmit} className="space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><KeyRound className="h-5 w-5" />YouTube public data</CardTitle>
-            <CardDescription>Official search and public video/channel statistics. This key is independent from both AI providers.</CardDescription>
+            <CardTitle className="flex items-center gap-2"><Database className="h-5 w-5" />YouTube research</CardTitle>
+            <CardDescription>Prefer the official Data API for the most consistent public metadata, or use local yt-dlp for a keyless/free fallback and on-demand transcripts.</CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-5">
             {isLoading ? (
-              <div className="flex min-h-28 items-center justify-center text-muted-foreground"><Loader2 className="mr-2 h-5 w-5 animate-spin" />Loading settings</div>
+              <div className="flex min-h-32 items-center justify-center text-muted-foreground"><Loader2 className="mr-2 h-5 w-5 animate-spin" />Loading research settings</div>
             ) : (
-              <SecretField
-                id="youtube-api-key"
-                label="YouTube Data API key"
-                description="Blank keeps the saved key. Use the clear option to remove it."
-                configured={status.youtube}
-                inputRef={youtubeKeyRef}
-                clearChecked={clearYoutubeKey}
-                onClearChange={setClearYoutubeKey}
-                providerUrl="https://console.cloud.google.com/apis/credentials"
-                providerLabel="Google Cloud credentials"
-              />
+              <>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">Mode: {youtubeSource}</Badge>
+                  {diagnostics && <Badge variant="outline">Active: {researchSourceLabel(diagnostics.research.preferred)}</Badge>}
+                  {diagnostics?.research.ytdlp.available && <Badge variant="outline" className="border-green-500/40 bg-green-500/10 text-green-500">yt-dlp {diagnostics.research.ytdlp.version || "ready"}</Badge>}
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="youtube-source">Research source</Label>
+                    <Select value={youtubeSource} onValueChange={(value) => setYoutubeSource(value as YouTubeSourceMode)}>
+                      <SelectTrigger id="youtube-source" data-testid="select-youtube-source"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">Automatic — Data API then yt-dlp</SelectItem>
+                        <SelectItem value="api">Official YouTube Data API only</SelectItem>
+                        <SelectItem value="ytdlp">Local yt-dlp only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">Automatic mode uses the API when a key is configured, then falls back for key/quota/network/provider failures.</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="ytdlp-path">yt-dlp executable</Label>
+                    <Input id="ytdlp-path" value={ytdlpPath} onChange={(event) => setYtdlpPath(event.target.value)} placeholder="yt-dlp" className="font-mono" data-testid="input-ytdlp-path" />
+                    <p className="text-xs text-muted-foreground">Use <code>yt-dlp</code> when it is on PATH or an absolute executable path.</p>
+                  </div>
+                  <div className="space-y-2 md:col-span-2">
+                    <Label htmlFor="ytdlp-timeout">yt-dlp timeout (ms)</Label>
+                    <Input id="ytdlp-timeout" type="number" min={1000} max={1800000} step={1000} value={ytdlpTimeoutMs} onChange={(event) => setYtdlpTimeoutMs(event.target.value)} className="font-mono" data-testid="input-ytdlp-timeout" />
+                  </div>
+                </div>
+
+                <SecretField
+                  id="youtube-api-key"
+                  label="YouTube Data API key"
+                  description="Optional in Automatic or yt-dlp-only mode. Blank keeps the saved key; use the clear option to remove it."
+                  configured={status.youtube}
+                  inputRef={youtubeKeyRef}
+                  clearChecked={clearYoutubeKey}
+                  onClearChange={setClearYoutubeKey}
+                  providerUrl="https://console.cloud.google.com/apis/credentials"
+                  providerLabel="Google Cloud credentials"
+                />
+
+                {diagnostics && (
+                  <div className="grid gap-3 rounded-lg border border-border/70 bg-muted/15 p-3 text-sm sm:grid-cols-3">
+                    <div><p className="text-xs text-muted-foreground">Research source</p><p className="mt-1 font-medium">{researchSourceLabel(diagnostics.research.preferred)}</p></div>
+                    <div><p className="text-xs text-muted-foreground">Search cache</p><p className="mt-1 font-medium">{diagnostics.cache.size}/{diagnostics.cache.maxEntries} entries · {Math.round(diagnostics.cache.hitRate * 100)}% hit rate</p></div>
+                    <div><p className="text-xs text-muted-foreground">Cache TTL</p><p className="mt-1 font-medium">{Math.round(diagnostics.cache.ttlMs / 60000)} minutes</p></div>
+                  </div>
+                )}
+
+                {diagnostics && !diagnostics.research.ytdlp.available && youtubeSource !== "api" && (
+                  <Alert>
+                    <Wrench className="h-4 w-4" />
+                    <AlertTitle>yt-dlp is not currently available</AlertTitle>
+                    <AlertDescription>{diagnostics.research.ytdlp.error || `No executable was detected at ${diagnostics.research.ytdlp.executable}.`} Install/update yt-dlp or use the Data API-only mode.</AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button type="button" variant="outline" onClick={() => void loadDiagnostics()} disabled={checkingDiagnostics}>
+                    {checkingDiagnostics ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                    Check local tools
+                  </Button>
+                  <a href="https://github.com/yt-dlp/yt-dlp" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">yt-dlp project / install instructions<ExternalLink className="h-3.5 w-3.5" /></a>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>

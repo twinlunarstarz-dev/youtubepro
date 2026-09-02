@@ -313,7 +313,10 @@ export async function generateResearchInsights(input: ResearchInsightsRequest): 
     channelCountry: video.channelStatistics?.country,
   }));
 
-  const prompt = `You are a careful YouTube research analyst. Analyze only the supplied public YouTube Data API snapshot and deterministic aggregates.
+  const sourceLabel = input.provenance.provider === "yt-dlp"
+    ? "local yt-dlp public metadata snapshot"
+    : "official YouTube Data API v3 public metadata snapshot";
+  const prompt = `You are a careful YouTube research analyst. Analyze only the supplied ${sourceLabel} and deterministic aggregates.
 
 Search query: ${query}
 Snapshot ID: ${snapshotId}
@@ -345,7 +348,7 @@ Return ONLY strict JSON in this exact shape:
   "contentGaps":["testable opportunity hypotheses"],
   "trendingSubtopics":["recurring sample topics"],
   "recommendedActions":[{"title":"exactly 3 total","rationale":"sample evidence + hypothesis + Studio validation metric","format":"..."}],
-  "methodology":{"sampleSize":${evidence.length},"basis":"Public YouTube Data API search-result metadata snapshot","limitations":["Missing owner-only Analytics metrics","Personalized and sampled search snapshot","Thumbnail pixels were not analyzed"]}
+  "methodology":{"sampleSize":${evidence.length},"basis":"${sourceLabel}","limitations":["Missing owner-only Analytics metrics","Personalized and sampled search snapshot","Thumbnail pixels were not analyzed"]}
 }`;
 
   try {

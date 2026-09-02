@@ -6,12 +6,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AgriciDaniel/youtubepro.git"
+    "url": "https://github.com/twinlunarstarz-dev/youtubepro.git"
   },
   "bugs": {
-    "url": "https://github.com/AgriciDaniel/youtubepro/issues"
+    "url": "https://github.com/twinlunarstarz-dev/youtubepro/issues"
   },
-  "homepage": "https://github.com/AgriciDaniel/youtubepro#readme",
+  "homepage": "https://github.com/twinlunarstarz-dev/youtubepro#readme",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"

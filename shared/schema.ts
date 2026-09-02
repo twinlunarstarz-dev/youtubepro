@@ -137,7 +137,7 @@ export const enrichmentStageSchema = z.object({
 }).strict();
 
 export const searchProvenanceSchema = z.object({
-  provider: z.literal("youtube-data-api-v3"),
+  provider: z.enum(["youtube-data-api-v3", "yt-dlp"]),
   query: z.string().trim().min(1).max(200),
   filters: z.object({
     uploadDate: z.nativeEnum(UploadDateFilter),

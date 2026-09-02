@@ -84,35 +84,35 @@ export function providerErrorPayload(error: ProviderError, contextLabel: string)
   const copy: Record<ProviderErrorCategory, { error: string; suggestion: string }> = {
     missing_key: {
       error: `${contextLabel} is not configured`,
-      suggestion: "Configure the provider endpoint, model, and optional key in Settings, then try again.",
+      suggestion: "Open Settings, configure the required local tool/provider or key, then try again.",
     },
     invalid_key: {
       error: `${contextLabel} rejected the configured API key`,
-      suggestion: "Replace or clear the relevant provider key in Settings, then verify the endpoint authentication settings.",
+      suggestion: "Replace the relevant API key in Settings or verify the endpoint authentication settings.",
     },
     quota: {
       error: `${contextLabel} quota is unavailable`,
-      suggestion: "Wait for quota to reset, switch to a local endpoint, or review the provider quota before retrying.",
+      suggestion: "Wait for quota to reset, switch to an available local source/provider, or review provider quota before retrying.",
     },
     timeout: {
       error: `${contextLabel} timed out`,
-      suggestion: "Check the endpoint and increase the matching LLM or image timeout in Settings if the provider is simply slow.",
+      suggestion: "Check the endpoint/tool and increase its timeout in Settings if the local hardware or operation needs more time.",
     },
     network: {
       error: `${contextLabel} could not be reached`,
-      suggestion: "Check the configured base URL in Settings and make sure the selected local or remote server is running.",
+      suggestion: "Check the configured address and make sure the local or remote provider/tool is running and network access is available.",
     },
     provider_server: {
-      error: `${contextLabel} returned a server error`,
-      suggestion: "Retry after a short delay or inspect the selected provider logs.",
+      error: `${contextLabel} returned a server/tool error`,
+      suggestion: "Retry once, then inspect Settings diagnostics or the local provider/tool logs if the problem continues.",
     },
     invalid_response: {
       error: `${contextLabel} returned an invalid response`,
-      suggestion: "Retry once. If it continues, use Settings model discovery or choose another compatible model/endpoint.",
+      suggestion: "Retry once. If it continues, choose a compatible model/source and inspect the provider/tool logs.",
     },
     unknown: {
       error: `${contextLabel} encountered an issue`,
-      suggestion: "Retry once. If it continues, inspect the provider logs and verify the connection in Settings.",
+      suggestion: "Retry once. If it continues, inspect Settings diagnostics and the server/provider logs.",
     },
   };
 

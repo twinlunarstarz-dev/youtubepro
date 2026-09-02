@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { searchVideos } from "./youtube-cache";
+import { getYouTubeSearchCacheStats, searchVideos } from "./youtube-cache";
+import { getYouTubeSourceStatus } from "./youtube-source";
+import { fetchTranscriptWithYtDlp } from "./ytdlp";
 import {
   extractNarrationText,
   generateIdeas,
@@ -74,10 +76,34 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express,
 ): Promise<Server> {
+  app.get("/api/health", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({
+      ok: true,
+      service: "youtube-pro",
+      timestamp: new Date().toISOString(),
+      uptimeSeconds: Math.round(process.uptime()),
+    });
+  });
+
   app.get("/api/settings/status", (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     if (!requireLocalSettings(req, res)) return;
     return res.json(getApiKeyStatus());
+  });
+
+  app.get("/api/settings/diagnostics", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (!requireLocalSettings(req, res)) return;
+    try {
+      return res.json({
+        research: await getYouTubeSourceStatus(true),
+        cache: getYouTubeSearchCacheStats(),
+      });
+    } catch (error: unknown) {
+      const providerError = normalizeProviderError(error, "youtube");
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "Research diagnostics"));
+    }
   });
 
   app.put("/api/settings/api-keys", async (req, res) => {
@@ -143,42 +169,53 @@ export async function registerRoutes(
         sortBy: sortBy || "relevance",
         maxResults: maxResults ? parseInt(maxResults as string, 10) : 25,
       });
-      res.json(await searchVideos(filters));
+      return res.json(await searchVideos(filters));
     } catch (error: any) {
       console.error("YouTube search error:", error);
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid search parameters", details: error.errors });
       }
       const providerError = normalizeProviderError(error, "youtube");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "YouTube Data API"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "YouTube research source"));
+    }
+  });
+
+  app.get("/api/youtube/transcript/:videoId", rateLimit, async (req, res) => {
+    try {
+      const language = typeof req.query.language === "string" ? req.query.language : undefined;
+      return res.json(await fetchTranscriptWithYtDlp(req.params.videoId, language));
+    } catch (error: unknown) {
+      console.error("Transcript retrieval error:", error);
+      const providerError = normalizeProviderError(error, "youtube");
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "Local transcript retrieval"));
     }
   });
 
   app.post("/api/script/generate", rateLimit, async (req, res) => {
     try {
       const input = scriptInputSchema.parse(req.body);
-      res.json(await generateScript(input));
+      return res.json(await generateScript(input));
     } catch (error: any) {
       console.error("Script generation error:", error);
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid script input", details: error.errors });
       }
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
   app.post("/api/script/extract-narration", rateLimit, async (req, res) => {
     try {
       const { scriptContent } = narrationExtractionRequestSchema.parse(req.body);
-      res.json({ narration: extractNarrationText(scriptContent) });
+      return res.json({ narration: extractNarrationText(scriptContent) });
     } catch (error: any) {
       console.error("Narration extraction error:", error);
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid narration extraction request", details: error.errors });
       }
       const friendly = getUserFriendlyError(error, "Narration extraction");
-      res.status(500).json({ error: friendly.message, suggestion: friendly.suggestion });
+      return res.status(500).json({ error: friendly.message, suggestion: friendly.suggestion });
     }
   });
 
@@ -188,11 +225,11 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid grounded idea request", details: parsed.error.errors });
       }
-      res.json(await generateIdeas(parsed.data));
+      return res.json(await generateIdeas(parsed.data));
     } catch (error: unknown) {
       console.error("Ideas generation error:", error);
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
@@ -206,11 +243,11 @@ export async function registerRoutes(
           details: parsed.error.errors,
         });
       }
-      res.json(await generateResearchInsights(parsed.data));
+      return res.json(await generateResearchInsights(parsed.data));
     } catch (error: unknown) {
       console.error("Research insights error:", error);
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
@@ -218,14 +255,14 @@ export async function registerRoutes(
     try {
       const { topic, format, audience, evidenceContext } = titleRegenerationRequestSchema.parse(req.body);
       const titles = await regenerateTitles(topic, format, audience, evidenceContext);
-      res.json({ titles });
+      return res.json({ titles });
     } catch (error: any) {
       console.error("Title regeneration error:", error);
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid title regeneration request", details: error.errors });
       }
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
@@ -242,11 +279,11 @@ export async function registerRoutes(
           details: parsed.error.flatten(),
         });
       }
-      res.json(await regenerateSection(parsed.data));
+      return res.json(await regenerateSection(parsed.data));
     } catch (error: unknown) {
       console.error("Section regeneration error:", error);
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
@@ -263,11 +300,11 @@ export async function registerRoutes(
           details: parsed.error.flatten(),
         });
       }
-      res.json(await regenerateParagraph(parsed.data));
+      return res.json(await regenerateParagraph(parsed.data));
     } catch (error: unknown) {
       console.error("Paragraph regeneration error:", error);
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 
@@ -285,11 +322,11 @@ export async function registerRoutes(
         });
       }
       const { topic, ...config } = parsed.data;
-      res.json(await generateThumbnail(topic, config));
+      return res.json(await generateThumbnail(topic, config));
     } catch (error: unknown) {
       console.error("Thumbnail generation error:", error);
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI image provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI image provider"));
     }
   });
 
@@ -306,11 +343,11 @@ export async function registerRoutes(
           details: parsed.error.flatten(),
         });
       }
-      res.json({ suggestions: await generateThumbnailSuggestions(parsed.data) });
+      return res.json({ suggestions: await generateThumbnailSuggestions(parsed.data) });
     } catch (error: unknown) {
       console.error("Thumbnail suggestions error:", error);
       const providerError = normalizeProviderError(error, "ai");
-      res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
+      return res.status(providerError.status).json(providerErrorPayload(providerError, "AI provider"));
     }
   });
 

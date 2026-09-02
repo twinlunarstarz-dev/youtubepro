@@ -274,8 +274,35 @@ function readLegacyState(): Partial<WorkflowState> | null {
     const stored = window.sessionStorage.getItem(LEGACY_STORAGE_KEY);
     return stored ? JSON.parse(stored) as Partial<WorkflowState> : null;
   } catch (error) {
-    console.error("Failed to read the legacy workflow cache:", error);
+    console.warn("Legacy workflow session storage is unavailable:", error);
     return null;
+  }
+}
+
+function removeLegacyState() {
+  try {
+    window.sessionStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch (error) {
+    console.warn("Could not clear legacy workflow session storage:", error);
+  }
+}
+
+function readActiveWorkflowId(): string | null {
+  try {
+    return window.localStorage.getItem(ACTIVE_WORKFLOW_KEY);
+  } catch (error) {
+    console.warn("Active workflow localStorage is unavailable:", error);
+    return null;
+  }
+}
+
+function writeActiveWorkflowId(id: string) {
+  try {
+    window.localStorage.setItem(ACTIVE_WORKFLOW_KEY, id);
+  } catch (error) {
+    // IndexedDB remains the authoritative workflow store. Failure to persist
+    // this convenience pointer must never break editing or saving a workflow.
+    console.warn("Could not persist the active workflow pointer:", error);
   }
 }
 
@@ -293,7 +320,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     const summary = summaryFromState(nextState);
     if (!summary || !nextState.id || !nextState.createdAt || !nextState.updatedAt) return;
     setRecentWorkflows((current) => sortAndLimitWorkflowSummaries([summary, ...current]));
-    window.localStorage.setItem(ACTIVE_WORKFLOW_KEY, nextState.id);
+    writeActiveWorkflowId(nextState.id);
     saveQueueRef.current = saveQueueRef.current.then(async () => {
       await putWorkflowRecord({
         id: nextState.id as string,
@@ -306,7 +333,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       setHistoryError(null);
     }).catch((error) => {
       console.error("Failed to save workflow history:", error);
-      setHistoryError("Recent workflows could not be saved in this browser.");
+      setHistoryError("Recent workflows could not be saved in this browser. Keep this tab open until browser storage is available again.");
     });
   }, []);
 
@@ -316,7 +343,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       try {
         const records = await listWorkflowRecords<WorkflowState>();
         if (cancelled) return;
-        const activeId = window.localStorage.getItem(ACTIVE_WORKFLOW_KEY);
+        const activeId = readActiveWorkflowId();
         let selectedRecord = records.find((record) => record.id === activeId) || records[0];
         if (!selectedRecord) {
           const migrated = normalizeState(readLegacyState() || {});
@@ -327,12 +354,12 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
             state: migrated,
           };
           await putWorkflowRecord(selectedRecord);
-          window.sessionStorage.removeItem(LEGACY_STORAGE_KEY);
+          removeLegacyState();
           records.unshift(selectedRecord);
         }
         setState(normalizeState(selectedRecord.state, selectedRecord.id));
         setRecentWorkflows(recordsToSummaries(records));
-        window.localStorage.setItem(ACTIVE_WORKFLOW_KEY, selectedRecord.id);
+        writeActiveWorkflowId(selectedRecord.id);
       } catch (error) {
         console.error("Failed to load workflow history:", error);
         if (!cancelled) {
@@ -377,7 +404,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       const restored = normalizeState(record.state, record.id);
       restored.currentStep = restorableStep(restored);
       setState(restored);
-      window.localStorage.setItem(ACTIVE_WORKFLOW_KEY, id);
+      writeActiveWorkflowId(id);
       setHistoryError(null);
       return restored.currentStep;
     } catch (error) {
@@ -441,14 +468,14 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
         const restored = normalizeState(next.state, next.id);
         restored.currentStep = restorableStep(restored);
         setState(restored);
-        window.localStorage.setItem(ACTIVE_WORKFLOW_KEY, restored.id as string);
+        writeActiveWorkflowId(restored.id as string);
         setHistoryError(null);
         return restored.currentStep;
       }
       const now = Date.now();
       const fresh = createEmptyState(createWorkflowId(), now);
       setState(fresh);
-      window.localStorage.setItem(ACTIVE_WORKFLOW_KEY, fresh.id as string);
+      writeActiveWorkflowId(fresh.id as string);
       setHistoryError(null);
       return "research";
     } catch (error) {
